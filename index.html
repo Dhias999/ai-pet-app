@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Pet - PWA & Android Obsidian Export Version</title>
+    <link rel="icon" href="data:,">
+    <!-- PWA用マニフェストファイルのリンク -->
+    <link rel="manifest" href="manifest.json">
+    <!-- face-api.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <style>
+        body {
+            margin: 0;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+            gap: 20px;
+        }
+
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }
+
+        .pet-stage {
+            width: 320px;
+            height: 320px;
+            background-color: #2b2b2b;
+            border-radius: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+            overflow: hidden;
+            cursor: pointer;
+            position: relative;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .pet-stage svg {
+            width: 80%;
+            height: 80%;
+        }
+
+        .status-badge {
+            position: absolute;
+            top: 12px;
+            right: 15px;
+            font-size: 12px;
+            background: rgba(0,0,0,0.6);
+            padding: 5px 10px;
+            border-radius: 12px;
+            color: #74b9ff;
+            letter-spacing: 0.5px;
+        }
+
+        /* ACTIVATE オーバーレイ画面 */
+        .activate-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(26, 26, 26, 0.95);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 24px;
+            z-index: 10000;
+            cursor: pointer;
+            transition: opacity 0.3s ease;
+            padding: 20px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+
+        .activate-btn {
+            background: #0984e3;
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 30px;
+            box-shadow: 0 4px 15px rgba(9, 132, 227, 0.4);
+            cursor: pointer;
+            transition: transform 0.1s, background 0.2s;
+            margin-bottom: 10px;
+        }
+
+        .activate-btn:hover {
+            background: #74b9ff;
+            transform: scale(1.05);
+        }
+
+        .activate-hint {
+            font-size: 12px;
+            color: #aaa;
+            line-height: 1.5;
+        }
+
+        #cameraStream {
+            display: none;
+        }
+
+        .anim-emotion {
+            transition: all 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+        }
+
+        .anim-gaze {
+            transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .log-container {
+            width: 320px;
+            background: #252525;
+            border-radius: 14px;
+            padding: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+
+        .chat-log {
+            height: 70px;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.4;
+            color: #aaa;
+        }
+
+        .hint-text {
+            font-size: 11px;
+            color: #666;
+            margin-top: 6px;
+        }
+
+        /* テストモード用サイドパネル */
+        .test-panel {
+            width: 300px;
+            background: #252525;
+            border-radius: 14px;
+            padding: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            display: none;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .test-panel h3 {
+            margin: 0 0 5px 0;
+            font-size: 14px;
+            color: #74b9ff;
+        }
+
+        .test-output-box {
+            background: #1e1e1e;
+            border-radius: 8px;
+            padding: 10px;
+            height: 120px;
+            overflow-y: auto;
+            font-size: 12px;
+            color: #00cec9;
+            border: 1px solid #444;
+            text-align: left;
+            white-space: pre-wrap;
+        }
+
+        .test-input-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        .test-input-group input {
+            flex: 1;
+            padding: 8px;
+            border: none;
+            border-radius: 6px;
+            background: #333;
+            color: #fff;
+            font-size: 13px;
+        }
+
+        .test-input-group button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 6px;
+            background: #0984e3;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 13px;
+        }
+
+        .test-action-btn {
+            width: 100%;
+            padding: 8px;
+            background: #00b894;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .test-action-btn:hover { background: #55efc4; }
+
+        .status-indicators {
+            position: fixed;
+            bottom: 12px;
+            right: 15px;
+            font-size: 10px;
+            display: none;
+            gap: 6px;
+            align-items: center;
+            z-index: 9999;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 4px 8px;
+            border-radius: 6px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="cameraStream" autoplay playsinline muted></video>
+
+    <!-- メインステージ -->
+    <div class="main-container">
+        <div class="pet-stage" id="petStage" onclick="handleStageClick()">
+            <!-- 初回起動時オーバーレイ -->
+            <div id="activateOverlay" class="activate-overlay" onclick="event.stopPropagation()">
+                <button class="activate-btn" onclick="triggerActivation()">Vaultフォルダを選択して起動</button>
+                <div class="activate-hint">タップしてAndroidのファイル選択画面からObsidianのVaultフォルダを指定してください。</div>
+            </div>
+
+            <div id="statusBadge" class="status-badge">未起動</div>
+            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect width="600" height="600" fill="none"/>
+                <g id="faceGroup" class="anim-gaze" style="transform-origin: 300px 300px;">
+                    <g id="leftEyeGroup" class="anim-emotion" style="transform-origin: 175px 237px;">
+                        <rect id="leftEye" class="anim-emotion" x="170" y="147" width="10" height="180" rx="0" stroke="#0030FF" stroke-width="12" fill="none"/>
+                    </g>
+                    <g id="rightEyeGroup" class="anim-emotion" style="transform-origin: 425px 237px;">
+                        <rect id="rightEye" class="anim-emotion" x="420" y="147" width="10" height="180" rx="0" stroke="#0030FF" stroke-width="12" fill="none"/>
+                    </g>
+                    <path id="mouth" class="anim-emotion" d="M275 390 Q300 415 325 390" stroke="#0030FF" stroke-width="12" stroke-linecap="round" fill="none"/>
+                </g>
+            </svg>
+        </div>
+
+        <div class="log-container">
+            <div id="chatLog" class="chat-log">フォルダを選択して起動してね！</div>
+            <div class="hint-text">📁 ObsidianのVaultフォルダに直接書き込みます</div>
+        </div>
+    </div>
+
+    <!-- テストモード用サイドパネル -->
+    <div id="testPanel" class="test-panel">
+        <h3>🧪 テストモード操作パネル</h3>
+        <div>
+            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">音声出力 & ファイル書き込みログ:</div>
+            <div id="testOutputBox" class="test-output-box">（ログがここに蓄積されます）</div>
+        </div>
+        <div>
+            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">テキスト入力テスト:</div>
+            <div class="test-input-group">
+                <input type="text" id="testInput" placeholder="話しかける言葉を入力..." onkeydown="if(event.key==='Enter') submitTestInput()">
+                <button onclick="submitTestInput()">送信</button>
+            </div>
+        </div>
+        <div>
+            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">顔認識シミュレーション:</div>
+            <button class="test-action-btn" onclick="simulateFaceRecognition()">顔認証イベントを発生させる</button>
+        </div>
+    </div>
+
+    <!-- 画面右下のインジケータ -->
+    <div id="statusIndicators" class="status-indicators">
+        <span id="indSquare" style="color: #00b894;">■</span>
+        <span id="indCircle" style="color: #00b894;">●</span>
+    </div>
+
+    <script>
+        const GEMINI_API_KEY = "";
+        
+        // ★ true: テストパネル表示・直接テキスト入力可能 / false: 本番自動運用モード
+        const IS_TEST_MODE = true; 
+        const IS_AI_MODE = false;
+
+        let vaultDirHandle = null; 
+        let knownFaces = []; 
+
+        const emotionPresets = {
+            Default: { 
+                eyeW: 10, eyeH: 180, eyeRx: 0, eyeY: 147, rotL: 0, rotR: 0, 
+                mouthD: "M275 390 Q300 415 325 390", 
+                mouthOpenD: "M275 390 Q300 445 325 390", 
+                faceY: 0 
+            },
+            Happy: { 
+                eyeW: 12, eyeH: 75, eyeRx: 6, eyeY: 200, rotL: 15, rotR: -15, 
+                mouthD: "M270 380 Q300 435 330 380", 
+                mouthOpenD: "M270 370 Q300 460 330 370", 
+                faceY: 0 
+            },
+            Anger: { 
+                eyeW: 10, eyeH: 60, eyeRx: 0, eyeY: 207, rotL: -30, rotR: 30, 
+                mouthD: "M280 410 Q300 385 320 410", 
+                mouthOpenD: "M280 410 Q300 435 320 410", 
+                faceY: 0 
+            },
+            Surprised: { 
+                eyeW: 60, eyeH: 160, eyeRx: 30, eyeY: 150, rotL: 0, rotR: 0, 
+                mouthD: "M280 380 A 20 35 0 1 0 320 380 A 20 35 0 1 0 280 380 Z", 
+                mouthOpenD: "M275 370 A 25 45 0 1 0 325 370 A 25 45 0 1 0 275 370 Z", 
+                faceY: 0 
+            },
+            Sad: { 
+                eyeW: 80, eyeH: 10, eyeRx: 5, eyeY: 232, rotL: 0, rotR: 0, 
+                mouthD: "M280 415 Q300 390 320 415", 
+                mouthOpenD: "M280 410 Q300 425 320 410", 
+                faceY: 0 
+            },
+            SLEEP: { 
+                eyeW: 90, eyeH: 8, eyeRx: 4, eyeY: 240, rotL: 0, rotR: 0, 
+                mouthD: "M280 420 Q300 405 320 420", 
+                mouthOpenD: "M280 420 Q300 405 320 420", 
+                faceY: 80 
+            }
+        };
+
+        let currentEmotion = 'Default';
+        let isActivated = false;
+        let inactivityTimer = null;
+        let visionTimer = null;         
+        let lipSyncInterval = null;     
+        let isConversing = false;
+        let isSleeping = false;         
+        let isListening = false;        
+        let isCollectingImages = false; 
+
+        let isWaitingForName = false;
+        let pendingDescriptor = null;
+
+        window.addEventListener('DOMContentLoaded', () => {
+            setEmotion('Default');
+            if (IS_TEST_MODE) {
+                document.getElementById('testPanel').style.display = 'flex';
+                logToTestBox("【システム】テストモード有効。「Vaultフォルダを選択して起動」を押してください。");
+            } else {
+                document.getElementById('testPanel').style.display = 'none';
+                document.getElementById('statusIndicators').style.display = 'flex';
+            }
+            updateIndicators();
+        });
+
+        // PWA用サービスワーカーの登録
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('service-worker.js')
+                    .then(reg => console.log('Service Worker 登録成功:', reg))
+                    .catch(err => console.log('Service Worker 登録失敗:', err));
+            });
+        }
+
+        function logToTestBox(text) {
+            if (!IS_TEST_MODE) return;
+            const box = document.getElementById('testOutputBox');
+            box.innerText += text + "\n";
+            box.scrollTop = box.scrollHeight;
+        }
+
+        // --- Obsidian Vaultフォルダへの共通書き込み関数 ---
+        async function writeMarkdownFile(subDir, fileName, content, append = false) {
+            if (!vaultDirHandle) return;
+            try {
+                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
+                const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+
+                if (append) {
+                    const file = await fileHandle.getFile();
+                    const existingContent = await file.text();
+                    content = existingContent + "\n" + content;
+                }
+
+                const writable = await fileHandle.createWritable();
+                await writable.write(content);
+                await writable.close();
+                logToTestBox(`【保存成功】 ${subDir}/${fileName}`);
+            } catch (err) {
+                console.error("書き込みエラー:", err);
+                logToTestBox(`【エラー】保存失敗: ${err.message}`);
+            }
+        }
+
+        // --- Vault内から顔データの読み込み ---
+        async function loadKnownFacesFromVault() {
+            if (!vaultDirHandle) return;
+            try {
+                const personsDir = await vaultDirHandle.getDirectoryHandle("Persons", { create: true });
+                for await (const [name, handle] of personsDir.entries()) {
+                    if (handle.kind === 'file' && name.endsWith('.md')) {
+                        const file = await handle.getFile();
+                        const text = await file.text();
+                        const match = text.match(/```json\s*([\s\S]*?)\s*```/);
+                        if (match) {
+                            const data = JSON.parse(match[1]);
+                            if (data.descriptor) {
+                                const personName = name.replace('.md', '');
+                                knownFaces.push({
+                                    name: personName,
+                                    descriptor: new Float32Array(data.descriptor)
+                                });
+                            }
+                        }
+                    }
+                }
+                logToTestBox(`【記憶復元】Vaultから ${knownFaces.length}人分の顔データを読み込みました。`);
+            } catch (err) {
+                logToTestBox("【情報】Personsフォルダから新規読み込み完了。");
+            }
+        }
+
+        // --- アクティベーション（フォルダの選択・権限取得） ---
+        async function triggerActivation() {
+            if (isActivated) return;
+
+            if (!window.showDirectoryPicker) {
+                alert("お使いのブラウザはフォルダアクセス（File System Access API）に対応していません。AndroidのChromeアプリ等で開き直してください。");
+                return;
+            }
+
+            try {
+                logToTestBox("【フォルダ選択】Androidのフォルダ選択画面が開きます...");
+                vaultDirHandle = await window.showDirectoryPicker();
+                isActivated = true;
+
+                const overlay = document.getElementById('activateOverlay');
+                const badge = document.getElementById('statusBadge');
+                const chatLog = document.getElementById('chatLog');
+
+                overlay.style.opacity = '0';
+                setTimeout(() => { overlay.style.display = 'none'; }, 300);
+
+                badge.innerText = "初期化中...";
+
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    const dummy = new SpeechSynthesisUtterance("");
+                    window.speechSynthesis.speak(dummy);
+                }
+
+                if (!IS_TEST_MODE) {
+                    badge.innerText = "カメラ起動中";
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+                    document.getElementById('cameraStream').srcObject = stream;
+
+                    badge.innerText = "モデル読込中";
+                    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+                    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                    await faceapi.nets.faceLandmark64Net.loadFromUri(MODEL_URL);
+                    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                }
+
+                badge.innerText = "記憶を復元中";
+                await loadKnownFacesFromVault();
+
+                badge.innerText = "位置情報確認";
+                await getCurrentLocation();
+
+                badge.innerText = "待機モード";
+                const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）`;
+                chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
+                setEmotion('Happy');
+                
+                speak(welcomeMsg, () => {
+                    setEmotion('Default');
+                    if (!IS_TEST_MODE) scheduleNextVisionCheck();
+                });
+
+            } catch (err) {
+                console.error(err);
+                if (err.name !== 'AbortError') {
+                    alert("フォルダ選択エラー: " + err.message);
+                }
+            }
+        }
+
+        function updateIndicators() {
+            if (IS_TEST_MODE) return;
+            const indSquare = document.getElementById('indSquare');
+            const indCircle = document.getElementById('indCircle');
+
+            if (isSleeping) indSquare.style.color = '#0984e3'; 
+            else if (isListening) indSquare.style.color = '#d63031'; 
+            else indSquare.style.color = '#00b894'; 
+
+            if (isCollectingImages) indCircle.style.color = '#d63031'; 
+            else indCircle.style.color = '#00b894'; 
+        }
+
+        function setEmotion(emotionName) {
+            if (!emotionPresets[emotionName]) emotionName = 'Default';
+            currentEmotion = emotionName;
+            const p = emotionPresets[emotionName];
+
+            const lEye = document.getElementById('leftEye');
+            const rEye = document.getElementById('rightEye');
+            const lGroup = document.getElementById('leftEyeGroup');
+            const rGroup = document.getElementById('rightEyeGroup');
+            const mouth = document.getElementById('mouth');
+            const faceGroup = document.getElementById('faceGroup');
+
+            lEye.setAttribute('x', 175 - p.eyeW / 2);
+            rEye.setAttribute('x', 425 - p.eyeW / 2);
+            lEye.setAttribute('width', p.eyeW); lEye.setAttribute('height', p.eyeH); lEye.setAttribute('rx', p.eyeRx); lEye.setAttribute('y', p.eyeY);
+            rEye.setAttribute('width', p.eyeW); rEye.setAttribute('height', p.eyeH); rEye.setAttribute('rx', p.eyeRx); rEye.setAttribute('y', p.eyeY);
+            lGroup.style.transform = `rotate(${p.rotL}deg)`;
+            rGroup.style.transform = `rotate(${p.rotR}deg)`;
+            mouth.setAttribute('d', p.mouthD);
+            
+            faceGroup.dataset.shiftY = p.faceY;
+            if (emotionName === 'Default' || emotionName === 'SLEEP') {
+                faceGroup.style.transform = `translate(0px, ${p.faceY}px)`;
+            }
+
+            updateIndicators();
+        }
+
+        function startLipSync() {
+            stopLipSync();
+            const mouth = document.getElementById('mouth');
+            let isOpen = false;
+
+            lipSyncInterval = setInterval(() => {
+                const preset = emotionPresets[currentEmotion] || emotionPresets.Default;
+                isOpen = !isOpen;
+                mouth.setAttribute('d', isOpen ? preset.mouthOpenD : preset.mouthD);
+            }, 120);
+        }
+
+        function stopLipSync() {
+            if (lipSyncInterval) {
+                clearInterval(lipSyncInterval);
+                lipSyncInterval = null;
+            }
+            const mouth = document.getElementById('mouth');
+            const preset = emotionPresets[currentEmotion] || emotionPresets.Default;
+            if (mouth) mouth.setAttribute('d', preset.mouthD);
+        }
+
+        function speak(text, callback) {
+            logToTestBox(`[ペット発話]: ${text}`);
+
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                stopLipSync();
+
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'ja-JP';
+                utterance.pitch = 1.8;
+                utterance.rate = 1.6;
+
+                utterance.onstart = () => { startLipSync(); };
+                utterance.onend = () => {
+                    stopLipSync();
+                    if (callback) callback();
+                };
+                utterance.onerror = () => {
+                    stopLipSync();
+                    if (callback) callback();
+                };
+
+                window.speechSynthesis.speak(utterance);
+            } else {
+                if (callback) callback();
+            }
+        }
+
+        async function getCurrentLocation() {
+            if (!navigator.geolocation) return { name: "位置情報非対応", lat: null, lon: null };
+
+            return new Promise((resolve) => {
+                navigator.geolocation.getCurrentPosition(async (position) => {
+                    const lat = position.coords.latitude;
+                    const lon = position.coords.longitude;
+                    try {
+                        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&accept-language=ja`);
+                        const data = await res.json();
+                        const address = data.address || {};
+                        const locationName = address.amenity || address.shop || address.suburb || address.city || address.town || "お出かけ先";
+                        resolve({ name: locationName, lat: lat, lon: lon });
+                    } catch (err) {
+                        resolve({ name: "現在地", lat: lat, lon: lon });
+                    }
+                }, (error) => {
+                    resolve({ name: "自宅周辺", lat: null, lon: null });
+                }, { timeout: 5000 });
+            });
+        }
+
+        async function syncLocationToVault(loc) {
+            const filename = `${loc.name}.md`;
+            const content = `# 場所: ${loc.name}\n- **緯度・経度**: ${loc.lat}, ${loc.lon}\n- **登録日時**: ${new Date().toLocaleString()}\n`;
+            await writeMarkdownFile("Locations", filename, content, false);
+            return `おっ、ここは「${loc.name}」だね！`;
+        }
+
+        async function saveMemoryToVault(userText, petReply, emotion, personName = null) {
+            const loc = await getCurrentLocation();
+            const now = new Date();
+            const dateStr = now.toISOString().split('T')[0];
+            const timeStr = now.toTimeString().split(' ')[0];
+            const filename = `${dateStr}.md`;
+
+            let logContent = `### [${timeStr}] 会話ログ\n`;
+            if (personName) logContent += `- **相手**: ${personName}\n`;
+            logContent += `- **場所**: ${loc.name} (Lat: ${loc.lat}, Lon: ${loc.lon})\n`;
+            logContent += `- **ユーザー**: ${userText}\n`;
+            logContent += `- **ペット**: ${petReply} (感情: ${emotion})\n\n`;
+
+            await writeMarkdownFile("Episodes", filename, logContent, true);
+        }
+
+        async function saveNewPersonToVault(name, descriptor, userUtterance) {
+            const loc = await getCurrentLocation();
+            const now = new Date();
+            const dateStr = now.toISOString().split('T')[0];
+            
+            const profileFilename = `${name}.md`;
+            const descriptorArray = Array.from(descriptor);
+            const profileContent = `# ${name}のプロフィール\n- **初対面日時**: ${now.toLocaleString()}\n- **出会った場所**: ${loc.name}\n- **最初の会話**: ${userUtterance}\n\n\`\`\`json\n{"descriptor": ${JSON.stringify(descriptorArray)}}\n\`\`\`\n`;
+
+            await writeMarkdownFile("Persons", profileFilename, profileContent, false);
+
+            const episodeFilename = `${dateStr}.md`;
+            const episodeContent = `### [${now.toTimeString().split(' ')[0]}] 新規出会いログ\n- **出来事**: ${loc.name}で${name}さんと初めて出会って、名前を教えてもらった。\n\n`;
+            await writeMarkdownFile("Episodes", episodeFilename, episodeContent, true);
+        }
+
+        function extractName(text) {
+            let name = text.replace(/です|だよ|だよ！|さん|くん|ちゃん|と申します|と言います/g, '').trim();
+            return name || "ゲスト";
+        }
+
+        async function processMessage(message) {
+            message = message.trim();
+            if (!message) return;
+
+            logToTestBox(`[ユーザー発言]: ${message}`);
+            const chatLog = document.getElementById('chatLog');
+            chatLog.innerHTML = `<strong>あなた:</strong> ${message}`;
+
+            if (isWaitingForName) {
+                isWaitingForName = false;
+                const newName = extractName(message);
+
+                if (pendingDescriptor) {
+                    knownFaces.push({ name: newName, descriptor: pendingDescriptor });
+                    await saveNewPersonToVault(newName, pendingDescriptor, message);
+                    pendingDescriptor = null;
+                }
+
+                const reply = `わあ、${newName}さんっていうんだね！これからよろしくね！`;
+                chatLog.innerHTML = `<strong>ペット:</strong> ${reply}`;
+                setEmotion('Happy');
+                speak(reply, () => { returnToIdleMode(); });
+                return;
+            }
+
+            if (message.includes("おはよう")) {
+                isSleeping = false;
+                setEmotion('Default');
+                document.getElementById('statusBadge').innerText = "待機モード";
+                
+                const loc = await getCurrentLocation();
+                const locationComment = await syncLocationToVault(loc);
+
+                const wakeup = `おはよう！目が覚めたよ！${locationComment}`;
+                chatLog.innerHTML = `<strong>ペット:</strong> ${wakeup}`;
+                speak(wakeup);
+                await saveMemoryToVault(message, wakeup, "Default");
+                return;
+            }
+
+            if (isSleeping) return;
+
+            if (message.includes("スリープ") || message.includes("おやすみ")) {
+                isSleeping = true;
+                if (visionTimer) clearTimeout(visionTimer);
+                setEmotion('SLEEP');
+                document.getElementById('statusBadge').innerText = "スリープ中";
+                const sleepMsg = "おやすみなさい…また呼んでね。";
+                chatLog.innerHTML = `<strong>ペット:</strong> ${sleepMsg}`;
+                speak(sleepMsg);
+                await saveMemoryToVault(message, sleepMsg, "SLEEP");
+                return;
+            }
+
+            isConversing = true;
+            document.getElementById('statusBadge').innerText = "会話中";
+            resetInactivityTimer();
+
+            if (message.includes("バイバイ") || message.includes("おしまい") || message.includes("またね") || message.includes("終了")) {
+                const farewell = "またお話ししようね！バイバイ！";
+                chatLog.innerHTML = `<strong>ペット:</strong> ${farewell}`;
+                setEmotion('Happy');
+                speak(farewell, () => { returnToIdleMode(); });
+                await saveMemoryToVault(message, farewell, "Happy");
+                return;
+            }
+
+            try {
+                await new Promise(resolve => setTimeout(resolve, 400));
+                let emotion = "Default";
+                let reply = "うんうん、もっとお話ししようよ！";
+
+                if (message.includes("笑") || message.includes("楽し")) {
+                    emotion = "Happy"; reply = "わあ、なんだか嬉しい気持ちになるね！";
+                } else if (message.includes("怒") || message.includes("むか")) {
+                    emotion = "Anger"; reply = "むむっ、何か嫌なことでもあったの？";
+                } else if (message.includes("びっく") || message.includes("えっ")) {
+                    emotion = "Surprised"; reply = "えっ、本当！？びっくりしちゃった！";
+                } else if (message.includes("悲") || message.includes("さみ")) {
+                    emotion = "Sad"; reply = "そっか…僕がそばにいるから元気を出してね。";
+                }
+
+                chatLog.innerHTML = `<strong>ペット:</strong> ${reply}`;
+                if (emotion) setEmotion(emotion);
+                speak(reply);
+                await saveMemoryToVault(message, reply, emotion);
+
+            } catch (error) {
+                console.error(error);
+                const errReply = "ちょっと調子が悪いみたい…。";
+                chatLog.innerHTML = `<strong>ペット:</strong> ${errReply}`;
+                speak(errReply);
+            }
+        }
+
+        function simulateFaceRecognition() {
+            logToTestBox("【テスト】手動で顔認証イベントをトリガーしました。");
+            if (knownFaces.length > 0) {
+                const targetName = knownFaces[0].name;
+                const greeting = `あっ、${targetName}さんだ！こんにちは！`;
+                document.getElementById('chatLog').innerHTML = `<strong>ペット:</strong> ${greeting}`;
+                setEmotion('Happy');
+                speak(greeting);
+            } else {
+                isWaitingForName = true;
+                pendingDescriptor = new Float32Array(128).fill(0.1);
+                setEmotion('Surprised');
+                const question = "あれ？はじめて見るお顔だね！お名前なんて言うの？";
+                document.getElementById('chatLog').innerHTML = `<strong>ペット:</strong> ${question}`;
+                speak(question);
+            }
+        }
+
+        function scheduleNextVisionCheck() {
+            if (IS_TEST_MODE || isSleeping || isConversing) return;
+            if (visionTimer) clearTimeout(visionTimer);
+            visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, 8000);
+        }
+
+        async function performFaceRecognitionCheck() {
+            if (IS_TEST_MODE || isSleeping || isConversing) return;
+        }
+
+        function resetInactivityTimer() {
+            if (inactivityTimer) clearTimeout(inactivityTimer);
+            inactivityTimer = setTimeout(() => { returnToIdleMode(); }, 30000);
+        }
+
+        function returnToIdleMode() {
+            isConversing = false;
+            isWaitingForName = false;
+            pendingDescriptor = null;
+            setEmotion('Default');
+            document.getElementById('statusBadge').innerText = "待機モード";
+            if (!IS_TEST_MODE && !isSleeping) scheduleNextVisionCheck();
+        }
+
+        function handleStageClick() {
+            if (isSleeping) {
+                processMessage("おはよう");
+            }
+        }
+
+        function submitTestInput() {
+            const inputEl = document.getElementById('testInput');
+            const val = inputEl.value.trim();
+            inputEl.value = '';
+            if (val) processMessage(val);
+        }
+    </script>
+</body>
+</html>
