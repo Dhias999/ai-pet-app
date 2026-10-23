@@ -114,8 +114,14 @@
             line-height: 1.5;
         }
 
+        /* PWAやモバイルで確実に動作させるためのビデオ要素スタイル調整 */
         #cameraStream {
-            display: none;
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0.01;
+            pointer-events: none;
+            z-index: -1;
         }
 
         .anim-emotion {
@@ -277,9 +283,8 @@
 
         let blinkTimer = null;
         let gazeTimer = null;
-        let safetyTimeout = null; // フェイルセーフ用タイマー
+        let safetyTimeout = null;
 
-        // --- フラグを強制リセットして正常な顔認証ループへ復帰させる堅牢化関数 ---
         function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
             isWaitingForLocationName = false;
@@ -310,7 +315,6 @@
                 updateIndicators();
                 dbgLog("[音声認識] 聞き取り中...");
                 
-                // フェイルセーフ: 20秒間何もイベントが起きなければ強制リセット
                 if (safetyTimeout) clearTimeout(safetyTimeout);
                 safetyTimeout = setTimeout(() => {
                     if (isConversing || isWaitingForName || isWaitingForLocationName) {
@@ -509,7 +513,10 @@
             const voices = window.speechSynthesis.getVoices();
             if (!voices || voices.length === 0) return;
 
-            japaneseVoices = voices.filter(v => v.lang === 'ja-JP' || v.lang === 'ja');
+            japaneseVoices = voices.filter(v => v.lang && (v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')));
+            if (japaneseVoices.length === 0) {
+                japaneseVoices = voices;
+            }
             
             const select = document.getElementById('voiceSelect');
             if (select && japaneseVoices.length > 0) {
@@ -523,15 +530,7 @@
                     select.appendChild(option);
                 });
 
-                const defaultIndex = japaneseVoices.findIndex(v => 
-                    v.name.includes('Google') || 
-                    v.name.includes('Kyoko') || 
-                    v.name.includes('female') || 
-                    v.name.includes('Female') ||
-                    v.name.includes('ja-jp-x-jal-local')
-                );
-                
-                const targetIndex = defaultIndex !== -1 ? defaultIndex : 0;
+                const targetIndex = 0;
                 select.value = targetIndex;
                 selectedVoice = japaneseVoices[targetIndex];
                 dbgLog(`[音声初期選択] ${selectedVoice.name} (候補数: ${japaneseVoices.length})`);
@@ -817,9 +816,30 @@
 
                 badge.innerText = "カメラ起動中";
                 dbgLog("カメラへのアクセスを要求中...");
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-                document.getElementById('cameraStream').srcObject = stream;
-                dbgLog("カメラ起動成功");
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } 
+                });
+                
+                const videoEl = document.getElementById('cameraStream');
+                videoEl.srcObject = stream;
+                
+                // PWAやモバイルブラウザで確実にビデオのロードと再生を完了させる
+                await new Promise((resolve) => {
+                    videoEl.onloadedmetadata = () => {
+                        videoEl.play().then(() => {
+                            dbgLog("カメラストリーム再生開始成功");
+                            resolve();
+                        }).catch(e => {
+                            dbgLog(`[カメラ再生例外] ${e.message}`, true);
+                            resolve();
+                        });
+                    };
+                    // すでにメタデータが読み込まれている場合の保険
+                    if (videoEl.readyState >= 2) {
+                        videoEl.play().catch(() => {});
+                        resolve();
+                    }
+                });
 
                 if (recognition) {
                     badge.innerText = "マイク準備中";
@@ -881,7 +901,7 @@
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
                     if (locResult.isKnown) {
-                        scheduleNextVisionCheck(15000);
+                        scheduleNextVisionCheck(3000); // 起動後少し早めに初回顔認証チェック
                     } else {
                         startListening();
                     }
@@ -997,20 +1017,25 @@
             if (isSleeping || isConversing || !isActivated || isWaitingForName || isWaitingForLocationName) return;
 
             const videoEl = document.getElementById('cameraStream');
-            if (!videoEl || videoEl.paused || videoEl.ended) {
-                scheduleNextVisionCheck();
+            if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
+                dbgLog("[顔認識スキップ] ビデオがまだ準備できていません");
+                scheduleNextVisionCheck(4000);
                 return;
             }
 
             try {
+                // デバッグ用に検出試行ログ
+                dbgLog("[顔認識] 顔検出を試行中...");
                 const detections = await faceapi.detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
 
                 if (!detections) {
+                    dbgLog("[顔認識] 顔は検出されませんでした");
                     currentPresentPersons.clear();
                     scheduleNextVisionCheck();
                     return;
                 }
 
+                dbgLog("[顔認識] 顔を検知しました！照合中...");
                 const currentDescriptor = detections.descriptor;
                 let bestMatchName = null;
 
@@ -1027,7 +1052,7 @@
                 if (bestMatchName) {
                     if (!currentPresentPersons.has(bestMatchName)) {
                         currentPresentPersons.add(bestMatchName);
-                        dbgLog(`[顔認識] ${bestMatchName} さんを検知しました`);
+                        dbgLog(`[顔認識] ${bestMatchName} さんを認識しました`);
                         setEmotion('Happy');
                         speak(`${bestMatchName}さん、こんにちは！`, () => {
                             setEmotion('Default');
@@ -1043,7 +1068,6 @@
                     pendingFaceDescriptor = currentDescriptor;
                     isWaitingForName = true;
 
-                    // フェイルセーフ: 新規名前入力待ちも25秒でタイムアウトして復帰できるようにする
                     if (safetyTimeout) clearTimeout(safetyTimeout);
                     safetyTimeout = setTimeout(() => {
                         if (isWaitingForName) {
