@@ -300,17 +300,20 @@
             dbgLog("[SYSTEM] インタラクション状態をリセットし、顔認証ループに復帰しました");
         }
 
-        // --- 音声認識（SpeechRecognition）の初期化 ---
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        let recognition = null;
+        // --- 音声認識（SpeechRecognition）のファクトリー＆動的生成関数 ---
+        function createRecognitionInstance() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                dbgLog("このブラウザは音声認識非対応です", true);
+                return null;
+            }
 
-        if (SpeechRecognition) {
-            recognition = new SpeechRecognition();
-            recognition.lang = 'ja-JP';
-            recognition.interimResults = false;
-            recognition.maxAlternatives = 1;
+            const rec = new SpeechRecognition();
+            rec.lang = 'ja-JP';
+            rec.interimResults = false;
+            rec.maxAlternatives = 1;
 
-            recognition.onstart = () => {
+            rec.onstart = () => {
                 isListening = true;
                 updateIndicators();
                 dbgLog("[音声認識] 聞き取り中...");
@@ -319,13 +322,13 @@
                 safetyTimeout = setTimeout(() => {
                     if (isConversing || isWaitingForName || isWaitingForLocationName) {
                         dbgLog("[警告] 音声認識がタイムアウトしました。状態を強制リセットします", true);
-                        try { recognition.stop(); } catch(e) {}
+                        try { rec.stop(); } catch(e) {}
                         resetInteractionState(5000);
                     }
                 }, 20000);
             };
 
-            recognition.onresult = (event) => {
+            rec.onresult = (event) => {
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
                 const rawTranscript = event.results[0][0].transcript.trim();
@@ -374,7 +377,7 @@
                     const hasSuffix = suffixes.some(suffix => personName.endsWith(suffix));
                     const speakName = hasSuffix ? personName : `${personName}さん`;
 
-                    speak(`「${speakName}」だね。覚えたよ！`, async () => {
+                    speak(`🎵 「${speakName}」だね。覚えたよ！`, async () => {
                         await savePersonToVault(personName, pendingFaceDescriptor);
                         currentPresentPersons.add(personName);
                         setEmotion('Happy');
@@ -416,30 +419,35 @@
                 resetInteractionState(8000);
             };
 
-            recognition.onerror = (event) => {
+            rec.onerror = (event) => {
                 dbgLog(`[音声エラー] ${event.error}`, true);
                 resetInteractionState(8000);
             };
 
-            recognition.onend = () => {
+            rec.onend = () => {
                 isListening = false;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
             };
-        } else {
-            dbgLog("このブラウザは音声認識非対応です", true);
+
+            return rec;
         }
 
+        let recognitionInstance = null;
+
         function startListening() {
-            if (!recognition) {
-                dbgLog("音声認識オブジェクトが初期化されていません", true);
-                return;
-            }
             if (isListening || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
             try {
-                isConversing = true; 
-                recognition.start();
+                isConversing = true;
+                // 毎回クリーンな認識インスタンスを生成してPWAでのロックを回避
+                if (recognitionInstance) {
+                    try { recognitionInstance.stop(); } catch(e) {}
+                }
+                recognitionInstance = createRecognitionInstance();
+                if (recognitionInstance) {
+                    recognitionInstance.start();
+                }
             } catch (err) {
                 dbgLog(`[音声認識起動例外] ${err.message}`, true);
                 resetInteractionState(8000);
@@ -796,7 +804,7 @@
             currentKnownLocationName = locationName;
         }
 
-        // --- アクティベーション（PWAマイク・カメラ・ファイル権限の一括取得） ---
+        // --- アクティベーション（PWAカメラ・ファイル権限の取得） ---
         async function triggerActivation() {
             if (isActivated) return;
 
@@ -824,18 +832,6 @@
                     window.speechSynthesis.cancel();
                     const dummy = new SpeechSynthesisUtterance("");
                     window.speechSynthesis.speak(dummy);
-                }
-
-                // ★ PWAでのマイク権限をユーザージェスチャ内で強制的に確立する
-                badge.innerText = "マイク確認中";
-                dbgLog("マイク（音声入力）の権限を要求中...");
-                try {
-                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    // 権限獲得後に不要になったオーディオトラックは即停止
-                    audioStream.getTracks().forEach(track => track.stop());
-                    dbgLog("マイクのパーミッション取得成功");
-                } catch (micErr) {
-                    dbgLog(`[マイク警告] ${micErr.message} (音声認識が制限される可能性があります)`, true);
                 }
 
                 badge.innerText = "カメラ起動中";
