@@ -6,7 +6,6 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
     event.waitUntil(self.clients.claim());
 });
-
 self.addEventListener('fetch', (event) => {
     // 外部CDN（unpkgなど）へのリクエストはService Workerで処理せず、そのままブラウザに任せる
     if (event.request.url.includes('unpkg.com')) {
