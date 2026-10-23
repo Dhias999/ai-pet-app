@@ -596,12 +596,17 @@
                     document.getElementById('cameraStream').srcObject = stream;
 
                     badge.innerText = "モデル読込中";
+                    
+                    // ★ faceapiがロードされているか確認するチェックを追加
+                    if (typeof faceapi === 'undefined') {
+                        throw new Error("face-api.js の読み込みに失敗しました。ネットワーク接続を確認してください。");
+                    }
+
                     const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
                     await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceLandmark64Net.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                 }
-
                 badge.innerText = "記憶を復元中";
                 await loadKnownFacesFromVault();
                 await loadKnownLocationsFromVault();
