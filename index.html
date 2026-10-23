@@ -563,12 +563,14 @@
             if (isActivated) return;
 
             if (!window.showDirectoryPicker) {
-                alert("お使いのブラウザはフォルダアクセス（File System Access API）に対応していません。AndroidのChromeアプリ等で開き直してください。");
+                alert("お使いのブラウザはフォルダアクセスに対応していません。AndroidのChromeアプリ等で開き直してください。");
                 return;
             }
 
             try {
                 logToTestBox("【フォルダ選択】Androidのフォルダ選択画面が開きます...");
+                
+                // ★ ユーザーのタップ直後に即座にフォルダ選択ダイアログを呼ぶ（これが一番重要）
                 vaultDirHandle = await window.showDirectoryPicker();
                 isActivated = true;
 
@@ -587,6 +589,7 @@
                     window.speechSynthesis.speak(dummy);
                 }
 
+                // フォルダ権限が取れてからカメラやモデルの読み込みを行う
                 if (!IS_TEST_MODE) {
                     badge.innerText = "カメラ起動中";
                     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
@@ -623,7 +626,6 @@
                 }
             }
         }
-
         function updateIndicators() {
             if (IS_TEST_MODE) return;
             const indSquare = document.getElementById('indSquare');
