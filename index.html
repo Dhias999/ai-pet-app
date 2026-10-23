@@ -257,6 +257,58 @@
         let blinkTimer = null;
         let gazeTimer = null;
 
+        // --- 音声認識（SpeechRecognition）の初期化 ---
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition = null;
+
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ja-JP';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = () => {
+                isListening = true;
+                updateIndicators();
+                dbgLog("[音声認識] 聞き取り中...");
+            };
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                dbgLog(`[音声認識結果] ${transcript}`);
+                const chatLog = document.getElementById('chatLog');
+                if (chatLog) {
+                    chatLog.innerHTML = `<strong>あなた:</strong> ${transcript}`;
+                }
+            };
+
+            recognition.onerror = (event) => {
+                dbgLog(`[音声認識エラー] ${event.error}`, true);
+            };
+
+            recognition.onend = () => {
+                isListening = false;
+                updateIndicators();
+                dbgLog("[音声認識] 終了");
+            };
+        } else {
+            dbgLog("このブラウザは音声認識非対応です", true);
+        }
+
+        function startListening() {
+            if (!recognition) {
+                dbgLog("音声認識オブジェクトが初期化されていません", true);
+                return;
+            }
+            if (isListening || isSleeping) return;
+
+            try {
+                recognition.start();
+            } catch (err) {
+                dbgLog(`[音声認識起動例外] ${err.message}`, true);
+            }
+        }
+
         const emotionPresets = {
             Default: { 
                 eyeW: 10, eyeH: 180, eyeRx: 0, eyeY: 147, rotL: 0, rotR: 0, 
@@ -363,8 +415,8 @@
 
             if (!faceGroup) return;
 
-            const shiftX = (Math.random() - 0.5) * 50; 
-            const shiftY = (Math.random() - 0.5) * 30;
+            const shiftX = (Math.random() - 0.5) * 120; 
+            const shiftY = (Math.random() - 0.5) * 90;
 
             faceGroup.style.transform = `translate(${shiftX}px, ${shiftY}px)`;
 
@@ -599,7 +651,6 @@
                 chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
                 setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
                 
-                // ★ 待機アニメーション（まばたき・きょろきょろ）を開始
                 startIdleAnimations();
 
                 speak(welcomeMsg, () => {
@@ -675,6 +726,7 @@
             if (mouth) mouth.setAttribute('d', preset.mouthD);
         }
 
+        // --- ① 音声出力の後に聞き取るタイミング ---
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
 
@@ -694,6 +746,9 @@
                 utterance.onend = () => {
                     stopLipSync();
                     if (callback) callback();
+                    
+                    // 音声出力終了直後に聞き取り開始
+                    setTimeout(startListening, 300);
                 };
                 utterance.onerror = () => {
                     stopLipSync();
@@ -716,10 +771,21 @@
             if (isSleeping || isConversing) return;
         }
 
+        // --- ② 画面をタッチした後に聞き取るタイミング ---
         function handleStageClick() {
             if (isSleeping) {
-                // 起床処理
+                isSleeping = false;
+                setEmotion('Default');
+                speak("おはよう！起きたよ。", () => {
+                    startIdleAnimations();
+                });
+                return;
             }
+
+            dbgLog("画面タップによる音声入力を開始します");
+            speak("なあに？お話を聞くよ。", () => {
+                startListening();
+            });
         }
     </script>
 </body>
