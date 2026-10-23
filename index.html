@@ -247,9 +247,12 @@
         let vaultDirHandle = null; 
         let knownFaces = []; 
         let knownLocations = []; 
+        let currentPresentPersons = new Set(); // 現在認識中の人物リスト
 
         let isWaitingForLocationName = false;
         let pendingLocationCoords = null;
+        let isWaitingForName = false;          // 新規人物の名前待ちフラグ
+        let pendingFaceDescriptor = null;      // 未知の顔のベクトルデータ一時保持
         let currentKnownLocationName = "お出かけ先";
         let japaneseVoices = [];
         let selectedVoice = null;
@@ -274,11 +277,83 @@
             };
 
             recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
+                const transcript = event.results[0][0].transcript.trim();
                 dbgLog(`[音声認識結果] ${transcript}`);
                 const chatLog = document.getElementById('chatLog');
                 if (chatLog) {
                     chatLog.innerHTML = `<strong>あなた:</strong> ${transcript}`;
+                }
+
+                // ★ 新しい人物の名前を待っている状態の場合の処理
+                if (isWaitingForName) {
+                    isWaitingForName = false;
+                    const transcriptClean = transcript.replace(/[\\/:*?"<>|]/g, '').trim();
+
+                    // 否定的なメッセージ（登録をキャンセルしたい場合）の判定
+                    const denyKeywords = ['違う', 'ううん', 'いや', 'いいえ', 'やめる', 'キャンセル', 'ちがう'];
+                    const isDenied = denyKeywords.some(keyword => transcriptClean.includes(keyword));
+
+                    if (isDenied) {
+                        speak("そっか、人違いだったんだね。ごめんね！", () => {
+                            pendingFaceDescriptor = null;
+                            isConversing = false;
+                            setEmotion('Default');
+                            setTimeout(() => {
+                                scheduleNextVisionCheck();
+                            }, 2000);
+                        });
+                        return;
+                    }
+
+                    // 通常の名前登録処理
+                    const personName = transcriptClean;
+                    const suffixes = ['さん', 'ちゃん', 'くん', 'やん'];
+                    const hasSuffix = suffixes.some(suffix => personName.endsWith(suffix));
+                    const speakName = hasSuffix ? personName : `${personName}さん`;
+
+                    speak(`「${speakName}」だね。覚えたよ！`, async () => {
+                        await savePersonToVault(personName, pendingFaceDescriptor);
+                        currentPresentPersons.add(personName);
+                        pendingFaceDescriptor = null;
+                        isConversing = false;
+
+                        setEmotion('Happy');
+                        setTimeout(() => {
+                            setEmotion('Default');
+                            scheduleNextVisionCheck();
+                        }, 2000);
+                    });
+                    return;
+                }
+
+                // ★ 場所の名前を待っている状態の場合の処理
+                if (isWaitingForLocationName) {
+                    isWaitingForLocationName = false;
+                    const locationName = transcript.replace(/[\\/:*?"<>|]/g, '');
+
+                    speak(`「${locationName}」だね。覚えたよ！`, async () => {
+                        await saveLocationToVault(locationName, pendingLocationCoords);
+                        
+                        const presentPersonsArray = Array.from(currentPresentPersons);
+                        const personText = presentPersonsArray.length > 0 
+                            ? `${presentPersonsArray.join('さん、')}さんと一緒に` 
+                            : '';
+
+                        await saveEpisodeToVault(
+                            `${locationName}への到着`, 
+                            `${personText}初めて「${locationName}」にやってきた！`, 
+                            locationName,
+                            presentPersonsArray
+                        );
+
+                        pendingLocationCoords = null;
+                        setEmotion('Happy');
+                        setTimeout(() => {
+                            setEmotion('Default');
+                            scheduleNextVisionCheck();
+                        }, 2000);
+                    });
+                    return;
                 }
             };
 
@@ -357,9 +432,6 @@
         let isSleeping = false;         
         let isListening = false;        
         let isCollectingImages = false; 
-
-        let isWaitingForName = false;
-        let pendingDescriptor = null;
 
         window.addEventListener('DOMContentLoaded', () => {
             setEmotion('Default');
@@ -453,8 +525,48 @@
             }
         }
 
+        async function saveEpisodeToVault(episodeTitle, contentText, locationName, personNames = []) {
+            const dateStr = new Date().toISOString().split('T')[0];
+            const timeStr = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
+            const filename = `${dateStr}_${timeStr}_${episodeTitle}.md`;
+
+            let content = `# エピソード: ${episodeTitle}\n`;
+            content += `**日時**: ${new Date().toLocaleString()}\n`;
+            
+            if (locationName) {
+                content += `**場所**: [[${locationName}]]\n`;
+            }
+
+            if (personNames && personNames.length > 0) {
+                const personLinks = personNames.map(name => `[[${name}]]`).join(', ');
+                content += `**一緒にいた人**: ${personLinks}\n`;
+            }
+            
+            content += `\n## 内容\n${contentText}\n`;
+
+            await writeMarkdownFile("Episodes", filename, content, false);
+            dbgLog(`[エピソード保存] Episodes/${filename} を作成`);
+        }
+
+        async function savePersonToVault(personName, descriptor) {
+            const filename = `${personName}.md`;
+            const descriptorArray = Array.from(descriptor);
+            
+            const jsonStr = JSON.stringify({ descriptor: descriptorArray });
+            const content = `# 人物: ${personName}\n**登録日時**: ${new Date().toLocaleString()}\n\n\`\`\`json\n${jsonStr}\n\`\`\`\n`;
+
+            await writeMarkdownFile("Persons", filename, content, false);
+
+            knownFaces.push({
+                name: personName,
+                descriptor: descriptor
+            });
+            dbgLog(`[人物登録完了] Persons/${filename} を作成しました`);
+        }
+
         async function loadKnownFacesFromVault() {
             if (!vaultDirHandle) return;
+            knownFaces = [];
             try {
                 const personsDir = await vaultDirHandle.getDirectoryHandle("Persons", { create: true });
                 for await (const [name, handle] of personsDir.entries()) {
@@ -534,8 +646,8 @@
             const coords = await getCurrentLocation();
             
             if (!coords.lat || !coords.lon) {
-                currentKnownLocationName = "自宅周辺";
-                return { isKnown: true, name: currentKnownLocationName, message: "ここを「自宅周辺」としておくね。" };
+                currentKnownLocationName = "お出かけ先";
+                return { isKnown: true, name: currentKnownLocationName, message: "現在地が取得できなかったよ。" };
             }
 
             const THRESHOLD_METERS = 80;
@@ -616,6 +728,20 @@
                 document.getElementById('cameraStream').srcObject = stream;
                 dbgLog("カメラ起動成功");
 
+                // ★ マイク（音声入力）の事前許可をここで取得しておく
+                if (recognition) {
+                    badge.innerText = "マイク準備中";
+                    dbgLog("マイクのアクセス権を要求中...");
+                    try {
+                        recognition.start();
+                        setTimeout(() => {
+                            recognition.stop();
+                        }, 100);
+                    } catch (e) {
+                        dbgLog(`[マイク事前許可スキップ/例外] ${e.message}`);
+                    }
+                }
+
                 badge.innerText = "モデル読込中";
                 dbgLog("faceapi の構造を検証中...");
 
@@ -629,6 +755,11 @@
                 if (faceapi.nets.tinyFaceDetector) {
                     await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                     dbgLog("tinyFaceDetector ロード完了");
+                }
+
+                if (faceapi.nets.faceLandmark68Net) {
+                    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                    dbgLog("faceLandmark68Net ロード完了");
                 }
 
                 const recNet = faceapi.nets.faceRecognitionNet || faceapi.nets.recognitionNet;
@@ -726,7 +857,6 @@
             if (mouth) mouth.setAttribute('d', preset.mouthD);
         }
 
-        // --- ① 音声出力の後に聞き取るタイミング ---
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
 
@@ -746,8 +876,6 @@
                 utterance.onend = () => {
                     stopLipSync();
                     if (callback) callback();
-                    
-                    // 音声出力終了直後に聞き取り開始
                     setTimeout(startListening, 300);
                 };
                 utterance.onerror = () => {
@@ -762,16 +890,70 @@
         }
 
         function scheduleNextVisionCheck() {
-            if (isSleeping || isConversing) return;
+            if (isSleeping || isConversing || isWaitingForName || isWaitingForLocationName) return;
             if (visionTimer) clearTimeout(visionTimer);
             visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, 8000);
         }
 
         async function performFaceRecognitionCheck() {
-            if (isSleeping || isConversing) return;
+            if (isSleeping || isConversing || !isActivated || isWaitingForName || isWaitingForLocationName) return;
+
+            const videoEl = document.getElementById('cameraStream');
+            if (!videoEl || videoEl.paused || videoEl.ended) {
+                scheduleNextVisionCheck();
+                return;
+            }
+
+            try {
+                const detections = await faceapi.detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+
+                if (!detections) {
+                    currentPresentPersons.clear();
+                    scheduleNextVisionCheck();
+                    return;
+                }
+
+                const currentDescriptor = detections.descriptor;
+                let bestMatchName = null;
+
+                if (knownFaces.length > 0) {
+                    const labeledDescriptors = knownFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [f.descriptor]));
+                    const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.5);
+                    const bestMatch = faceMatcher.findBestMatch(currentDescriptor);
+
+                    if (bestMatch && bestMatch.label !== 'unknown') {
+                        bestMatchName = bestMatch.label;
+                    }
+                }
+
+                if (bestMatchName) {
+                    if (!currentPresentPersons.has(bestMatchName)) {
+                        currentPresentPersons.add(bestMatchName);
+                        dbgLog(`[顔認識] ${bestMatchName} さんを検知しました`);
+                        setEmotion('Happy');
+                        speak(`${bestMatchName}さん、こんにちは！`, () => {
+                            setEmotion('Default');
+                            scheduleNextVisionCheck();
+                        });
+                    } else {
+                        scheduleNextVisionCheck();
+                    }
+                } else {
+                    isConversing = true;
+                    setEmotion('Surprised');
+                    
+                    pendingFaceDescriptor = currentDescriptor;
+                    isWaitingForName = true;
+
+                    speak("あれ？初めて見るお顔だね。お名前を教えて！", () => {});
+                }
+
+            } catch (err) {
+                dbgLog(`[顔認識エラー] ${err.message}`, true);
+                scheduleNextVisionCheck();
+            }
         }
 
-        // --- ② 画面をタッチした後に聞き取るタイミング ---
         function handleStageClick() {
             if (isSleeping) {
                 isSleeping = false;
