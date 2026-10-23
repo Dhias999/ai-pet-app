@@ -449,7 +449,15 @@
             const voices = window.speechSynthesis.getVoices();
             japaneseVoices = voices.filter(v => v.lang === 'ja-JP' || v.lang === 'ja');
             if (japaneseVoices.length > 0) {
-                selectedVoice = japaneseVoices.find(v => v.name.includes('Google') || v.name.includes('Kyoko') || v.name.includes('female') || v.name.includes('Female')) || japaneseVoices[0];
+                selectedVoice = japaneseVoices.find(v => 
+                    v.name.includes('Google') || 
+                    v.name.includes('Kyoko') || 
+                    v.name.includes('female') || 
+                    v.name.includes('Female') ||
+                    v.name.includes('ja-jp-x-jal-local')
+                ) || japaneseVoices[0];
+                
+                dbgLog(`[音声選択] ${selectedVoice.name}`);
             }
         }
 
@@ -487,8 +495,8 @@
 
             if (!faceGroup) return;
 
-            const shiftX = (Math.random() - 0.5) * 120; 
-            const shiftY = (Math.random() - 0.5) * 90;
+            const shiftX = (Math.random() - 0.5) * 500; 
+            const shiftY = (Math.random() - 0.5) * 300;
 
             faceGroup.style.transform = `translate(${shiftX}px, ${shiftY}px)`;
 
@@ -728,7 +736,7 @@
                 document.getElementById('cameraStream').srcObject = stream;
                 dbgLog("カメラ起動成功");
 
-                // ★ マイク（音声入力）の事前許可をここで取得しておく
+                // マイク（音声入力）の事前許可をここで取得しておく
                 if (recognition) {
                     badge.innerText = "マイク準備中";
                     dbgLog("マイクのアクセス権を要求中...");
@@ -869,8 +877,8 @@
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = 'ja-JP';
                 if (selectedVoice) utterance.voice = selectedVoice;
-                utterance.pitch = 1.8;
-                utterance.rate = 1.6;
+                utterance.pitch = 1.6; 
+                utterance.rate = 1.3;  
 
                 utterance.onstart = () => { startLipSync(); };
                 utterance.onend = () => {
