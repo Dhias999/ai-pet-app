@@ -116,9 +116,9 @@
 
         #cameraStream {
             position: absolute;
-            width: 1px;
-            height: 1px;
-            opacity: 0.01;
+            width: 160px;
+            height: 120px;
+            opacity: 0;
             pointer-events: none;
             z-index: -1;
         }
@@ -249,7 +249,7 @@
         <span id="indSquare" style="color: #00b894;">■</span>
         <span id="indCircle" style="color: #00b894;">●</span>
     </div>
-    
+
     <script>
         function dbgLog(msg, isError = false) {
             const el = document.getElementById('debugConsole');
@@ -279,7 +279,7 @@
         let currentKnownLocationName = "お出かけ先";
         let japaneseVoices = [];
         let selectedVoice = null;
-        let voicesInitialized = false; // 既定の取得完了フラグ
+        let voicesInitialized = false;
 
         let blinkTimer = null;
         let gazeTimer = null;
@@ -499,12 +499,10 @@
             setEmotion('Default');
             initVoices();
             if ('speechSynthesis' in window) {
-                // ブラウザの非同期通知イベントを活用
                 window.speechSynthesis.onvoiceschanged = () => {
                     if (!voicesInitialized) initVoices();
                 };
 
-                // 取得できるまで最大5秒間だけ安全にポーリングし、取得できたら即座に停止する
                 let retryCount = 0;
                 const pollInterval = setInterval(() => {
                     if (voicesInitialized || retryCount > 10) {
@@ -521,14 +519,14 @@
         });
 
         function initVoices() {
-            if (voicesInitialized) return; // 既に初期化済みの場合は無駄な再処理をしない
+            if (voicesInitialized) return;
             if (!('speechSynthesis' in window)) return;
             const voices = window.speechSynthesis.getVoices();
             if (!voices || voices.length === 0) return;
 
             japaneseVoices = voices.filter(v => v.lang && (v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')));
             if (japaneseVoices.length === 0) {
-                japaneseVoices = voices; // フォールバック
+                japaneseVoices = voices;
             }
             
             const select = document.getElementById('voiceSelect');
@@ -544,7 +542,7 @@
                 const targetIndex = 0;
                 select.value = targetIndex;
                 selectedVoice = japaneseVoices[targetIndex];
-                voicesInitialized = true; // 成功フラグを立てて以降の重複処理を完全ブロック
+                voicesInitialized = true;
                 dbgLog(`[音声リスト読込成功] ${japaneseVoices.length}件の音声が見つかりました（選択: ${selectedVoice.name}）`);
             }
         }
@@ -798,7 +796,7 @@
             currentKnownLocationName = locationName;
         }
 
-        // --- アクティベーション ---
+        // --- アクティベーション（PWAマイク・カメラ・ファイル権限の一括取得） ---
         async function triggerActivation() {
             if (isActivated) return;
 
@@ -828,6 +826,18 @@
                     window.speechSynthesis.speak(dummy);
                 }
 
+                // ★ PWAでのマイク権限をユーザージェスチャ内で強制的に確立する
+                badge.innerText = "マイク確認中";
+                dbgLog("マイク（音声入力）の権限を要求中...");
+                try {
+                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    // 権限獲得後に不要になったオーディオトラックは即停止
+                    audioStream.getTracks().forEach(track => track.stop());
+                    dbgLog("マイクのパーミッション取得成功");
+                } catch (micErr) {
+                    dbgLog(`[マイク警告] ${micErr.message} (音声認識が制限される可能性があります)`, true);
+                }
+
                 badge.innerText = "カメラ起動中";
                 dbgLog("カメラへのアクセスを要求中...");
                 const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -852,19 +862,6 @@
                         resolve();
                     }
                 });
-
-                if (recognition) {
-                    badge.innerText = "マイク準備中";
-                    dbgLog("マイクのアクセス権を要求中...");
-                    try {
-                        recognition.start();
-                        setTimeout(() => {
-                            recognition.stop();
-                        }, 100);
-                    } catch (e) {
-                        dbgLog(`[マイク事前許可スキップ/例外] ${e.message}`);
-                    }
-                }
 
                 badge.innerText = "モデル読込中";
                 dbgLog("faceapi の構造を検証中...");
@@ -1022,7 +1019,6 @@
             if (isSleeping || isConversing || isWaitingForName || isWaitingForLocationName) return;
             if (visionTimer) clearTimeout(visionTimer);
             visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, delay);
-            dbgLog(`[顔認識] 次回の顔認証チェックを ${delay/1000}秒後に予約しました`);
         }
 
         async function performFaceRecognitionCheck() {
@@ -1037,12 +1033,13 @@
 
             try {
                 dbgLog("[顔認識] 顔検出を試行中...");
-                const detections = await faceapi.detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 });
+                const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
                 if (!detections) {
-                    dbgLog("[顔認識] 顔は検出されませんでした");
+                    dbgLog("[顔認識] 顔は検出されませんでした（カメラの向きや明るさを確認してください）");
                     currentPresentPersons.clear();
-                    scheduleNextVisionCheck(5000);
+                    scheduleNextVisionCheck(3000);
                     return;
                 }
 
