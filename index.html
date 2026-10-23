@@ -532,8 +532,11 @@
                 
                 await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                 dbgLog("tinyFaceDetector ロード完了");
-                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL); // ← 68に変更
-                dbgLog("faceLandmark68Net ロード完了");
+                
+                // ★ faceLandmark68Net から faceLandmarkNet に変更
+                await faceapi.nets.faceLandmarkNet.loadFromUri(MODEL_URL);
+                dbgLog("faceLandmarkNet ロード完了");
+                
                 await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                 dbgLog("faceRecognitionNet ロード完了");
 
