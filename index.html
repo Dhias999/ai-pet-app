@@ -277,6 +277,23 @@
 
         let blinkTimer = null;
         let gazeTimer = null;
+        let safetyTimeout = null; // フェイルセーフ用タイマー
+
+        // --- フラグを強制リセットして正常な顔認証ループへ復帰させる堅牢化関数 ---
+        function resetInteractionState(delay = 8000) {
+            isWaitingForName = false;
+            isWaitingForLocationName = false;
+            isConversing = false;
+            pendingFaceDescriptor = null;
+            pendingLocationCoords = null;
+            if (safetyTimeout) {
+                clearTimeout(safetyTimeout);
+                safetyTimeout = null;
+            }
+            setEmotion('Default');
+            scheduleNextVisionCheck(delay);
+            dbgLog("[SYSTEM] インタラクション状態をリセットし、顔認証ループに復帰しました");
+        }
 
         // --- 音声認識（SpeechRecognition）の初期化 ---
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -292,9 +309,21 @@
                 isListening = true;
                 updateIndicators();
                 dbgLog("[音声認識] 聞き取り中...");
+                
+                // フェイルセーフ: 20秒間何もイベントが起きなければ強制リセット
+                if (safetyTimeout) clearTimeout(safetyTimeout);
+                safetyTimeout = setTimeout(() => {
+                    if (isConversing || isWaitingForName || isWaitingForLocationName) {
+                        dbgLog("[警告] 音声認識がタイムアウトしました。状態を強制リセットします", true);
+                        try { recognition.stop(); } catch(e) {}
+                        resetInteractionState(5000);
+                    }
+                }, 20000);
             };
 
             recognition.onresult = (event) => {
+                if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
+
                 const rawTranscript = event.results[0][0].transcript.trim();
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
                 
@@ -311,12 +340,11 @@
                         const isCurrentlyHidden = (panel.style.display === 'none' || panel.style.display === '');
                         panel.style.display = isCurrentlyHidden ? 'flex' : 'none';
                         dbgLog(`[UI] コントロールパネルを${isCurrentlyHidden ? '表示' : '非表示'}にしました`);
-                        
-                        isConversing = false;
+                        initVoices();
+
                         setEmotion('Happy');
                         speak(isCurrentlyHidden ? "デバッグパネルを表示したよ！" : "デバッグパネルを隠したよ！", () => {
-                            setEmotion('Default');
-                            scheduleNextVisionCheck(8000);
+                            resetInteractionState(8000);
                         });
                     }
                     return;
@@ -332,10 +360,7 @@
 
                     if (isDenied) {
                         speak("そっか、人違いだったんだね。ごめんね！", () => {
-                            pendingFaceDescriptor = null;
-                            isConversing = false;
-                            setEmotion('Default');
-                            scheduleNextVisionCheck(15000);
+                            resetInteractionState(15000);
                         });
                         return;
                     }
@@ -348,13 +373,9 @@
                     speak(`「${speakName}」だね。覚えたよ！`, async () => {
                         await savePersonToVault(personName, pendingFaceDescriptor);
                         currentPresentPersons.add(personName);
-                        pendingFaceDescriptor = null;
-                        isConversing = false;
-
                         setEmotion('Happy');
                         setTimeout(() => {
-                            setEmotion('Default');
-                            scheduleNextVisionCheck(15000);
+                            resetInteractionState(15000);
                         }, 2000);
                     });
                     return;
@@ -380,25 +401,20 @@
                             presentPersonsArray
                         );
 
-                        pendingLocationCoords = null;
-                        isConversing = false;
                         setEmotion('Happy');
                         setTimeout(() => {
-                            setEmotion('Default');
-                            scheduleNextVisionCheck(8000);
+                            resetInteractionState(8000);
                         }, 2000);
                     });
                     return;
                 }
 
-                isConversing = false;
-                scheduleNextVisionCheck(8000);
+                resetInteractionState(8000);
             };
 
             recognition.onerror = (event) => {
                 dbgLog(`[音声認識エラー] ${event.error}`, true);
-                isConversing = false;
-                scheduleNextVisionCheck(8000);
+                resetInteractionState(8000);
             };
 
             recognition.onend = () => {
@@ -422,7 +438,7 @@
                 recognition.start();
             } catch (err) {
                 dbgLog(`[音声認識起動例外] ${err.message}`, true);
-                isConversing = false;
+                resetInteractionState(8000);
             }
         }
 
@@ -480,6 +496,8 @@
             initVoices();
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.onvoiceschanged = initVoices;
+                setTimeout(initVoices, 500);
+                setTimeout(initVoices, 1500);
             }
             document.getElementById('statusIndicators').style.display = 'flex';
             updateIndicators();
@@ -489,10 +507,14 @@
         function initVoices() {
             if (!('speechSynthesis' in window)) return;
             const voices = window.speechSynthesis.getVoices();
+            if (!voices || voices.length === 0) return;
+
             japaneseVoices = voices.filter(v => v.lang === 'ja-JP' || v.lang === 'ja');
             
             const select = document.getElementById('voiceSelect');
             if (select && japaneseVoices.length > 0) {
+                if (select.options.length === japaneseVoices.length) return;
+
                 select.innerHTML = '';
                 japaneseVoices.forEach((v, index) => {
                     const option = document.createElement('option');
@@ -512,7 +534,7 @@
                 const targetIndex = defaultIndex !== -1 ? defaultIndex : 0;
                 select.value = targetIndex;
                 selectedVoice = japaneseVoices[targetIndex];
-                dbgLog(`[音声初期選択] ${selectedVoice.name}`);
+                dbgLog(`[音声初期選択] ${selectedVoice.name} (候補数: ${japaneseVoices.length})`);
             }
         }
 
@@ -1021,12 +1043,21 @@
                     pendingFaceDescriptor = currentDescriptor;
                     isWaitingForName = true;
 
+                    // フェイルセーフ: 新規名前入力待ちも25秒でタイムアウトして復帰できるようにする
+                    if (safetyTimeout) clearTimeout(safetyTimeout);
+                    safetyTimeout = setTimeout(() => {
+                        if (isWaitingForName) {
+                            dbgLog("[警告] 名前入力待ちがタイムアウトしました。通常の監視に戻ります", true);
+                            resetInteractionState(5000);
+                        }
+                    }, 25000);
+
                     speak("あれ？初めて見るお顔だね。お名前を教えて！", () => {});
                 }
 
             } catch (err) {
                 dbgLog(`[顔認識エラー] ${err.message}`, true);
-                scheduleNextVisionCheck();
+                resetInteractionState(8000);
             }
         }
 
