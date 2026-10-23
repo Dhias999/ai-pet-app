@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
-<head>    <meta charset="UTF-8">
+<head>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
@@ -149,7 +150,7 @@
             margin-top: 6px;
         }
 
-        /* ★ 簡易デバッグ用コンソール */
+        /* 簡易デバッグ用コンソール */
         .debug-console {
             width: 320px;
             height: 180px;
@@ -216,7 +217,7 @@
         </div>
     </div>
 
-    <!-- ★ 簡易画面内デバッグ領域 -->
+    <!-- 簡易画面内デバッグ領域 -->
     <div style="font-size: 12px; color: #74b9ff; margin-top: 5px;">🐞 リアルタイムログコンソール</div>
     <div id="debugConsole" class="debug-console">[SYSTEM] 画面ログコンソール初期化完了...</div>
 
@@ -227,8 +228,6 @@
     </div>
 
     <script>
-
-        // ★ 画面内デバッグログの出力関数
         function dbgLog(msg, isError = false) {
             const el = document.getElementById('debugConsole');
             if (!el) return;
@@ -238,12 +237,11 @@
             el.scrollTop = el.scrollHeight;
         }
 
-        // JavaScriptのエラーをキャッチして画面ログに出す
         window.addEventListener('error', (e) => {
             dbgLog(`${e.message} (${e.filename}:${e.lineno})`, true);
         });
 
-        const IS_TEST_MODE = false; // 本番稼働モード
+        const IS_TEST_MODE = false; 
         const IS_AI_MODE = false;
 
         let vaultDirHandle = null; 
@@ -514,31 +512,25 @@
 
                 badge.innerText = "モデル読込中";
                 dbgLog("faceapi の構造を検証中...");
-                dbgLog(`typeof faceapi: ${typeof faceapi}`);
 
-                if (typeof faceapi !== 'undefined') {
-                    dbgLog(`faceapi.nets の有無: ${!!faceapi.nets}`);
-                    if (faceapi.nets) {
-                        dbgLog(`tinyFaceDetector の有無: ${!!faceapi.nets.tinyFaceDetector}`);
-                    }
-                }
-
-                if (typeof faceapi === 'undefined' || !faceapi.nets || !faceapi.nets.tinyFaceDetector) {
-                    throw new Error("faceapiの構造が不正または未ロードです");
+                if (typeof faceapi === 'undefined' || !faceapi.nets) {
+                    throw new Error("faceapiまたはnetsが未ロードです");
                 }
 
                 const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
                 dbgLog(`モデルをロード開始: ${MODEL_URL}`);
                 
-                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                dbgLog("tinyFaceDetector ロード完了");
-                
-                // ランドマークモデルのロードは一旦スキップして、認識モデルへ進む
-                if (faceapi.nets.faceRecognitionNet) {
-                    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-                    dbgLog("faceRecognitionNet ロード完了");
+                if (faceapi.nets.tinyFaceDetector) {
+                    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                    dbgLog("tinyFaceDetector ロード完了");
+                }
+
+                const recNet = faceapi.nets.faceRecognitionNet || faceapi.nets.recognitionNet;
+                if (recNet) {
+                    await recNet.loadFromUri(MODEL_URL);
+                    dbgLog("顔認識モデル ロード完了");
                 } else {
-                    throw new Error("faceRecognitionNet が見つかりません");
+                    dbgLog("警告: 顔認識モデルのプロパティが見つかりません", true);
                 }
 
                 badge.innerText = "記憶を復元中";
@@ -669,7 +661,7 @@
 
         function handleStageClick() {
             if (isSleeping) {
-                // 起床処理呼び出しなど
+                // 起床処理
             }
         }
     </script>
