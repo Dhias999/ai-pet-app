@@ -150,6 +150,15 @@
             margin-top: 6px;
         }
 
+        /* パネルエリア（初期状態は非表示） */
+        .control-panel {
+            display: none;
+            width: 320px;
+            flex-direction: column;
+            gap: 10px;
+            box-sizing: border-box;
+        }
+
         /* 簡易デバッグ用コンソール */
         .debug-console {
             width: 320px;
@@ -217,9 +226,18 @@
         </div>
     </div>
 
-    <!-- 簡易画面内デバッグ領域 -->
-    <div style="font-size: 12px; color: #74b9ff; margin-top: 5px;">🐞 リアルタイムログコンソール</div>
-    <div id="debugConsole" class="debug-console">[SYSTEM] 画面ログコンソール初期化完了...</div>
+    <!-- 「パネルオン」で表示されるコントロールパネル（音声選択＆ログテキストボックス） -->
+    <div id="controlPanel" class="control-panel">
+        <div>
+            <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">音声選択:</label>
+            <select id="voiceSelect" onchange="changeVoice(this)" style="width: 100%; font-size: 12px; background: #252525; color: #fff; border: 1px solid #444; padding: 6px; border-radius: 6px; box-sizing: border-box;"></select>
+        </div>
+
+        <div>
+            <div style="font-size: 12px; color: #74b9ff; margin-bottom: 4px;">🐞 リアルタイムログコンソール</div>
+            <div id="debugConsole" class="debug-console">[SYSTEM] 画面ログコンソール初期化完了...</div>
+        </div>
+    </div>
 
     <!-- 画面右下のインジケータ -->
     <div id="statusIndicators" class="status-indicators">
@@ -284,6 +302,26 @@
                     chatLog.innerHTML = `<strong>あなた:</strong> ${transcript}`;
                 }
 
+                // ★ パネルオンの判定
+                if (transcript.includes('パネルオン')) {
+                    const panel = document.getElementById('controlPanel');
+                    if (panel) panel.style.display = 'flex';
+                    speak("パネルを表示したよ！", () => {
+                        scheduleNextVisionCheck(5000);
+                    });
+                    return;
+                }
+
+                // ★ パネルオフの判定
+                if (transcript.includes('パネルオフ')) {
+                    const panel = document.getElementById('controlPanel');
+                    if (panel) panel.style.display = 'none';
+                    speak("パネルを隠したよ！", () => {
+                        scheduleNextVisionCheck(5000);
+                    });
+                    return;
+                }
+
                 // ★ 新しい人物の名前を待っている状態の場合の処理
                 if (isWaitingForName) {
                     isWaitingForName = false;
@@ -298,9 +336,7 @@
                             pendingFaceDescriptor = null;
                             isConversing = false;
                             setEmotion('Default');
-                            setTimeout(() => {
-                                scheduleNextVisionCheck();
-                            }, 2000);
+                            scheduleNextVisionCheck(15000);
                         });
                         return;
                     }
@@ -320,7 +356,7 @@
                         setEmotion('Happy');
                         setTimeout(() => {
                             setEmotion('Default');
-                            scheduleNextVisionCheck();
+                            scheduleNextVisionCheck(15000);
                         }, 2000);
                     });
                     return;
@@ -448,17 +484,37 @@
             if (!('speechSynthesis' in window)) return;
             const voices = window.speechSynthesis.getVoices();
             japaneseVoices = voices.filter(v => v.lang === 'ja-JP' || v.lang === 'ja');
-            if (japaneseVoices.length > 0) {
-                selectedVoice = japaneseVoices.find(v => 
+            
+            const select = document.getElementById('voiceSelect');
+            if (select && japaneseVoices.length > 0) {
+                select.innerHTML = '';
+                japaneseVoices.forEach((v, index) => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = `${v.name} (${v.lang})`;
+                    select.appendChild(option);
+                });
+
+                const defaultIndex = japaneseVoices.findIndex(v => 
                     v.name.includes('Google') || 
                     v.name.includes('Kyoko') || 
                     v.name.includes('female') || 
                     v.name.includes('Female') ||
                     v.name.includes('ja-jp-x-jal-local')
-                ) || japaneseVoices[0];
+                );
                 
-                dbgLog(`[音声選択] ${selectedVoice.name}`);
+                const targetIndex = defaultIndex !== -1 ? defaultIndex : 0;
+                select.value = targetIndex;
+                selectedVoice = japaneseVoices[targetIndex];
+                dbgLog(`[音声初期選択] ${selectedVoice.name}`);
             }
+        }
+
+        function changeVoice(selectElement) {
+            const index = selectElement.value;
+            selectedVoice = japaneseVoices[index];
+            dbgLog(`[音声を手動変更] ${selectedVoice.name}`);
+            speak("この声にするね！", () => {});
         }
 
         // --- 瞬き（まばたき）処理 ---
@@ -495,8 +551,8 @@
 
             if (!faceGroup) return;
 
-            const shiftX = (Math.random() - 0.5) * 500; 
-            const shiftY = (Math.random() - 0.5) * 300;
+            const shiftX = (Math.random() - 0.5) * 300; 
+            const shiftY = (Math.random() - 0.5) * 250;
 
             faceGroup.style.transform = `translate(${shiftX}px, ${shiftY}px)`;
 
@@ -736,7 +792,6 @@
                 document.getElementById('cameraStream').srcObject = stream;
                 dbgLog("カメラ起動成功");
 
-                // マイク（音声入力）の事前許可をここで取得しておく
                 if (recognition) {
                     badge.innerText = "マイク準備中";
                     dbgLog("マイクのアクセス権を要求中...");
@@ -785,6 +840,9 @@
                 badge.innerText = "位置情報確認";
                 const locResult = await checkOrAskLocation();
 
+                // 音声リストを確実に再取得して反映
+                initVoices();
+
                 badge.innerText = "待機モード";
                 const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
                 chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
@@ -794,7 +852,7 @@
 
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
-                    scheduleNextVisionCheck();
+                    scheduleNextVisionCheck(15000);
                 });
 
             } catch (err) {
@@ -897,10 +955,10 @@
             }
         }
 
-        function scheduleNextVisionCheck() {
+        function scheduleNextVisionCheck(delay = 8000) {
             if (isSleeping || isConversing || isWaitingForName || isWaitingForLocationName) return;
             if (visionTimer) clearTimeout(visionTimer);
-            visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, 8000);
+            visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, delay);
         }
 
         async function performFaceRecognitionCheck() {
@@ -941,7 +999,7 @@
                         setEmotion('Happy');
                         speak(`${bestMatchName}さん、こんにちは！`, () => {
                             setEmotion('Default');
-                            scheduleNextVisionCheck();
+                            scheduleNextVisionCheck(15000);
                         });
                     } else {
                         scheduleNextVisionCheck();
