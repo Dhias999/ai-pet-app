@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="ja">
-<head>
-    <meta charset="UTF-8">
+<head>    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
@@ -228,7 +227,7 @@
     </div>
 
     <script>
-        
+
         // ★ 画面内デバッグログの出力関数
         function dbgLog(msg, isError = false) {
             const el = document.getElementById('debugConsole');
@@ -533,8 +532,8 @@
                 
                 await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                 dbgLog("tinyFaceDetector ロード完了");
-                await faceapi.nets.faceLandmark64Net.loadFromUri(MODEL_URL);
-                dbgLog("faceLandmark64Net ロード完了");
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL); // ← 68に変更
+                dbgLog("faceLandmark68Net ロード完了");
                 await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                 dbgLog("faceRecognitionNet ロード完了");
 
