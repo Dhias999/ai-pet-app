@@ -123,7 +123,7 @@
         }
 
         .anim-gaze {
-            transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1);
         }
 
         .log-container {
@@ -254,6 +254,9 @@
         let japaneseVoices = [];
         let selectedVoice = null;
 
+        let blinkTimer = null;
+        let gazeTimer = null;
+
         const emotionPresets = {
             Default: { 
                 eyeW: 10, eyeH: 180, eyeRx: 0, eyeY: 147, rotL: 0, rotR: 0, 
@@ -324,6 +327,57 @@
             if (japaneseVoices.length > 0) {
                 selectedVoice = japaneseVoices.find(v => v.name.includes('Google') || v.name.includes('Kyoko') || v.name.includes('female') || v.name.includes('Female')) || japaneseVoices[0];
             }
+        }
+
+        // --- 瞬き（まばたき）処理 ---
+        function triggerBlink() {
+            if (isSleeping) return;
+
+            const lEye = document.getElementById('leftEye');
+            const rEye = document.getElementById('rightEye');
+            if (!lEye || !rEye) return;
+
+            const preset = emotionPresets[currentEmotion] || emotionPresets.Default;
+
+            lEye.setAttribute('height', 8);
+            rEye.setAttribute('height', 8);
+
+            setTimeout(() => {
+                lEye.setAttribute('height', preset.eyeH);
+                rEye.setAttribute('height', preset.eyeH);
+            }, 150);
+
+            const nextBlink = Math.random() * 3000 + 2000;
+            blinkTimer = setTimeout(triggerBlink, nextBlink);
+        }
+
+        // --- きょろきょろ（視線移動）処理 ---
+        function triggerGazeShift() {
+            const faceGroup = document.getElementById('faceGroup');
+
+            if (isSleeping || currentEmotion !== 'Default') {
+                if (faceGroup) faceGroup.style.transform = `translate(0px, 0px)`;
+                gazeTimer = setTimeout(triggerGazeShift, 4000);
+                return;
+            }
+
+            if (!faceGroup) return;
+
+            const shiftX = (Math.random() - 0.5) * 50; 
+            const shiftY = (Math.random() - 0.5) * 30;
+
+            faceGroup.style.transform = `translate(${shiftX}px, ${shiftY}px)`;
+
+            const nextGaze = Math.random() * 3000 + 3000;
+            gazeTimer = setTimeout(triggerGazeShift, nextGaze);
+        }
+
+        function startIdleAnimations() {
+            if (blinkTimer) clearTimeout(blinkTimer);
+            if (gazeTimer) clearTimeout(gazeTimer);
+            triggerBlink();
+            triggerGazeShift();
+            dbgLog("待機アニメーション（まばたき・視線移動）開始");
         }
 
         async function writeMarkdownFile(subDir, fileName, content, append = false) {
@@ -545,6 +599,9 @@
                 chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
                 setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
                 
+                // ★ 待機アニメーション（まばたき・きょろきょろ）を開始
+                startIdleAnimations();
+
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
                     scheduleNextVisionCheck();
