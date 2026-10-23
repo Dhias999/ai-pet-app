@@ -533,12 +533,13 @@
                 await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                 dbgLog("tinyFaceDetector ロード完了");
                 
-                // ★ faceLandmark68Net から faceLandmarkNet に変更
-                await faceapi.nets.faceLandmarkNet.loadFromUri(MODEL_URL);
-                dbgLog("faceLandmarkNet ロード完了");
-                
-                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-                dbgLog("faceRecognitionNet ロード完了");
+                // ランドマークモデルのロードは一旦スキップして、認識モデルへ進む
+                if (faceapi.nets.faceRecognitionNet) {
+                    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                    dbgLog("faceRecognitionNet ロード完了");
+                } else {
+                    throw new Error("faceRecognitionNet が見つかりません");
+                }
 
                 badge.innerText = "記憶を復元中";
                 await loadKnownFacesFromVault();
