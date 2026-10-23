@@ -297,12 +297,18 @@
     <script>
         const GEMINI_API_KEY = "";
         
-        // ★ true: テストパネル表示・直接テキスト入力可能 / false: 本番自動運用モード
         const IS_TEST_MODE = true; 
         const IS_AI_MODE = false;
 
         let vaultDirHandle = null; 
         let knownFaces = []; 
+        let knownLocations = []; 
+
+        let isWaitingForLocationName = false;
+        let pendingLocationCoords = null;
+        let currentKnownLocationName = "お出かけ先";
+        let japaneseVoices = [];
+        let selectedVoice = null;
 
         const emotionPresets = {
             Default: { 
@@ -358,6 +364,11 @@
 
         window.addEventListener('DOMContentLoaded', () => {
             setEmotion('Default');
+            initVoices();
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.onvoiceschanged = initVoices;
+            }
+
             if (IS_TEST_MODE) {
                 document.getElementById('testPanel').style.display = 'flex';
                 logToTestBox("【システム】テストモード有効。「Vaultフォルダを選択して起動」を押してください。");
@@ -367,6 +378,16 @@
             }
             updateIndicators();
         });
+
+        function initVoices() {
+            if (!('speechSynthesis' in window)) return;
+            const voices = window.speechSynthesis.getVoices();
+            japaneseVoices = voices.filter(v => v.lang === 'ja-JP' || v.lang === 'ja');
+            if (japaneseVoices.length > 0) {
+                // 女性ボイスやGoogle日本語音声などを優先的に選択
+                selectedVoice = japaneseVoices.find(v => v.name.includes('Google') || v.name.includes('Kyoko') || v.name.includes('female') || v.name.includes('Female')) || japaneseVoices[0];
+            }
+        }
 
         // PWA用サービスワーカーの登録
         if ('serviceWorker' in navigator) {
@@ -435,6 +456,108 @@
             }
         }
 
+        // --- Vault内から場所データの読み込み ---
+        async function loadKnownLocationsFromVault() {
+            if (!vaultDirHandle) return;
+            knownLocations = [];
+            try {
+                const locationsDir = await vaultDirHandle.getDirectoryHandle("Locations", { create: true });
+                for await (const [name, handle] of locationsDir.entries()) {
+                    if (handle.kind === 'file' && name.endsWith('.md')) {
+                        const file = await handle.getFile();
+                        const text = await file.text();
+                        const match = text.match(/\*\*緯度・経度\*\*:\s*([0-9.-]+),\s*([0-9.-]+)/);
+                        if (match) {
+                            knownLocations.push({
+                                name: name.replace('.md', ''),
+                                lat: parseFloat(match[1]),
+                                lon: parseFloat(match[2])
+                            });
+                        }
+                    }
+                }
+                logToTestBox(`【記憶復元】Vaultから ${knownLocations.length} 件の場所データを読み込みました。`);
+            } catch (err) {
+                logToTestBox("【情報】Locationsフォルダの読み込み完了。");
+            }
+        }
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371000;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        async function getCurrentLocation() {
+            if (!navigator.geolocation) return { lat: null, lon: null };
+
+            return new Promise((resolve) => {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    resolve({
+                        lat: position.coords.latitude,
+                        lon: position.coords.longitude
+                    });
+                }, (error) => {
+                    resolve({ lat: null, lon: null });
+                }, { timeout: 5000 });
+            });
+        }
+
+        async function checkOrAskLocation() {
+            const coords = await getCurrentLocation();
+            
+            if (!coords.lat || !coords.lon) {
+                currentKnownLocationName = "自宅周辺";
+                return { isKnown: true, name: currentKnownLocationName, message: "ここを「自宅周辺」としておくね。" };
+            }
+
+            const THRESHOLD_METERS = 80;
+            const matched = knownLocations.find(loc => {
+                const dist = calculateDistance(coords.lat, coords.lon, loc.lat, loc.lon);
+                return dist <= THRESHOLD_METERS;
+            });
+
+            if (matched) {
+                currentKnownLocationName = matched.name;
+                return {
+                    isKnown: true,
+                    name: matched.name,
+                    message: `ここは前に来たことがある「${matched.name}」だね！`
+                };
+            } else {
+                pendingLocationCoords = coords;
+                isWaitingForLocationName = true;
+                return {
+                    isKnown: false,
+                    name: null,
+                    message: "ここは初めて来る場所かな？場所の名前を教えて！"
+                };
+            }
+        }
+
+        async function saveLocationToVault(locationName, coords) {
+            const filename = `${locationName}.md`;
+            const latStr = coords && coords.lat !== null ? coords.lat : "不明";
+            const lonStr = coords && coords.lon !== null ? coords.lon : "不明";
+
+            const content = `# 場所: ${locationName}\n**緯度・経度**: ${latStr}, ${lonStr}\n**登録日時**: ${new Date().toLocaleString()}\n`;
+            await writeMarkdownFile("Locations", filename, content, false);
+
+            if (coords && coords.lat !== null && coords.lon !== null) {
+                knownLocations.push({
+                    name: locationName,
+                    lat: coords.lat,
+                    lon: coords.lon
+                });
+            }
+            currentKnownLocationName = locationName;
+        }
+
         // --- アクティベーション（フォルダの選択・権限取得） ---
         async function triggerActivation() {
             if (isActivated) return;
@@ -478,14 +601,15 @@
 
                 badge.innerText = "記憶を復元中";
                 await loadKnownFacesFromVault();
+                await loadKnownLocationsFromVault();
 
                 badge.innerText = "位置情報確認";
-                await getCurrentLocation();
+                const locResult = await checkOrAskLocation();
 
                 badge.innerText = "待機モード";
-                const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）`;
+                const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
                 chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
-                setEmotion('Happy');
+                setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
                 
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
@@ -570,9 +694,17 @@
                 window.speechSynthesis.cancel();
                 stopLipSync();
 
+                // 音声リストが未取得の場合は再取得を試みる
+                if (!selectedVoice) {
+                    initVoices();
+                }
+
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = 'ja-JP';
-                utterance.pitch = 1.8;
+                if (selectedVoice) {
+                    utterance.voice = selectedVoice;
+                }
+                utterance.pitch = 1.8; // 高め（マスコットらしい声）
                 utterance.rate = 1.6;
 
                 utterance.onstart = () => { startLipSync(); };
@@ -591,45 +723,16 @@
             }
         }
 
-        async function getCurrentLocation() {
-            if (!navigator.geolocation) return { name: "位置情報非対応", lat: null, lon: null };
-
-            return new Promise((resolve) => {
-                navigator.geolocation.getCurrentPosition(async (position) => {
-                    const lat = position.coords.latitude;
-                    const lon = position.coords.longitude;
-                    try {
-                        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&accept-language=ja`);
-                        const data = await res.json();
-                        const address = data.address || {};
-                        const locationName = address.amenity || address.shop || address.suburb || address.city || address.town || "お出かけ先";
-                        resolve({ name: locationName, lat: lat, lon: lon });
-                    } catch (err) {
-                        resolve({ name: "現在地", lat: lat, lon: lon });
-                    }
-                }, (error) => {
-                    resolve({ name: "自宅周辺", lat: null, lon: null });
-                }, { timeout: 5000 });
-            });
-        }
-
-        async function syncLocationToVault(loc) {
-            const filename = `${loc.name}.md`;
-            const content = `# 場所: ${loc.name}\n- **緯度・経度**: ${loc.lat}, ${loc.lon}\n- **登録日時**: ${new Date().toLocaleString()}\n`;
-            await writeMarkdownFile("Locations", filename, content, false);
-            return `おっ、ここは「${loc.name}」だね！`;
-        }
-
+        // --- Wikiリンク形式を活用したデータ保存関数 ---
         async function saveMemoryToVault(userText, petReply, emotion, personName = null) {
-            const loc = await getCurrentLocation();
             const now = new Date();
             const dateStr = now.toISOString().split('T')[0];
             const timeStr = now.toTimeString().split(' ')[0];
             const filename = `${dateStr}.md`;
 
             let logContent = `### [${timeStr}] 会話ログ\n`;
-            if (personName) logContent += `- **相手**: ${personName}\n`;
-            logContent += `- **場所**: ${loc.name} (Lat: ${loc.lat}, Lon: ${loc.lon})\n`;
+            if (personName) logContent += `- **相手**: [[${personName}]]\n`;
+            logContent += `- **場所**: [[${currentKnownLocationName}]]\n`;
             logContent += `- **ユーザー**: ${userText}\n`;
             logContent += `- **ペット**: ${petReply} (感情: ${emotion})\n\n`;
 
@@ -637,18 +740,17 @@
         }
 
         async function saveNewPersonToVault(name, descriptor, userUtterance) {
-            const loc = await getCurrentLocation();
             const now = new Date();
             const dateStr = now.toISOString().split('T')[0];
             
             const profileFilename = `${name}.md`;
             const descriptorArray = Array.from(descriptor);
-            const profileContent = `# ${name}のプロフィール\n- **初対面日時**: ${now.toLocaleString()}\n- **出会った場所**: ${loc.name}\n- **最初の会話**: ${userUtterance}\n\n\`\`\`json\n{"descriptor": ${JSON.stringify(descriptorArray)}}\n\`\`\`\n`;
+            const profileContent = `# ${name}のプロフィール\n**初対面日時**: ${now.toLocaleString()}\n**出会った場所**: [[${currentKnownLocationName}]]\n**最初の会話**: ${userUtterance}\n\n\`\`\`json\n{"descriptor": ${JSON.stringify(descriptorArray)}}\n\`\`\`\n`;
 
             await writeMarkdownFile("Persons", profileFilename, profileContent, false);
 
             const episodeFilename = `${dateStr}.md`;
-            const episodeContent = `### [${now.toTimeString().split(' ')[0]}] 新規出会いログ\n- **出来事**: ${loc.name}で${name}さんと初めて出会って、名前を教えてもらった。\n\n`;
+            const episodeContent = `### [${now.toTimeString().split(' ')[0]}] 新規出会いログ\n**出来事**: [[${currentKnownLocationName}]]で[[${name}]]さんと初めて出会って、名前を教えてもらった。\n\n`;
             await writeMarkdownFile("Episodes", episodeFilename, episodeContent, true);
         }
 
@@ -665,6 +767,22 @@
             const chatLog = document.getElementById('chatLog');
             chatLog.innerHTML = `<strong>あなた:</strong> ${message}`;
 
+            // 場所名入力待ちの状態
+            if (isWaitingForLocationName) {
+                isWaitingForLocationName = false;
+                const locationName = message;
+
+                await saveLocationToVault(locationName, pendingLocationCoords);
+                pendingLocationCoords = null;
+
+                const reply = `「${locationName}」だね！場所を新しく記録したよ！`;
+                chatLog.innerHTML = `<strong>ペット:</strong> ${reply}`;
+                setEmotion('Happy');
+                speak(reply, () => { returnToIdleMode(); });
+                return;
+            }
+
+            // 人物名入力待ちの状態
             if (isWaitingForName) {
                 isWaitingForName = false;
                 const newName = extractName(message);
@@ -675,7 +793,7 @@
                     pendingDescriptor = null;
                 }
 
-                const reply = `わあ、${newName}さんっていうんだね！これからよろしくね！`;
+                const reply = `わあ、[[${newName}]]さんっていうんだね！これからよろしくね！`;
                 chatLog.innerHTML = `<strong>ペット:</strong> ${reply}`;
                 setEmotion('Happy');
                 speak(reply, () => { returnToIdleMode(); });
@@ -687,13 +805,19 @@
                 setEmotion('Default');
                 document.getElementById('statusBadge').innerText = "待機モード";
                 
-                const loc = await getCurrentLocation();
-                const locationComment = await syncLocationToVault(loc);
+                const locResult = await checkOrAskLocation();
 
-                const wakeup = `おはよう！目が覚めたよ！${locationComment}`;
+                const wakeup = `おはよう！目が覚めたよ！${locResult.message}`;
                 chatLog.innerHTML = `<strong>ペット:</strong> ${wakeup}`;
+                
+                if (locResult.isKnown) {
+                    setEmotion('Happy');
+                } else {
+                    setEmotion('Surprised');
+                }
+                
                 speak(wakeup);
-                await saveMemoryToVault(message, wakeup, "Default");
+                await saveMemoryToVault(message, wakeup, locResult.isKnown ? "Happy" : "Surprised");
                 return;
             }
 
@@ -756,10 +880,11 @@
             logToTestBox("【テスト】手動で顔認証イベントをトリガーしました。");
             if (knownFaces.length > 0) {
                 const targetName = knownFaces[0].name;
-                const greeting = `あっ、${targetName}さんだ！こんにちは！`;
+                const greeting = `あっ、[[${targetName}]]さんだ！こんにちは！`;
                 document.getElementById('chatLog').innerHTML = `<strong>ペット:</strong> ${greeting}`;
                 setEmotion('Happy');
                 speak(greeting);
+                saveMemoryToVault("顔認証イベント", greeting, "Happy", targetName);
             } else {
                 isWaitingForName = true;
                 pendingDescriptor = new Float32Array(128).fill(0.1);
