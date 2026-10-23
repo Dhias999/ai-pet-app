@@ -597,15 +597,24 @@
 
                     badge.innerText = "モデル読込中";
                     
-                    // ★ faceapiがロードされているか確認するチェックを追加
+                    // faceapiの存在確認とデバッグ
                     if (typeof faceapi === 'undefined') {
-                        throw new Error("face-api.js の読み込みに失敗しました。ネットワーク接続を確認してください。");
+                        throw new Error("face-api.js が読み込まれていません。");
                     }
+                    
+                    // どのような構造になっているかコンソールに出力
+                    console.log("faceapi object:", faceapi);
+                    console.log("faceapi.nets:", faceapi.nets);
 
                     const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
-                    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                    await faceapi.nets.faceLandmark64Net.loadFromUri(MODEL_URL);
-                    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                    
+                    if (faceapi.nets && faceapi.nets.tinyFaceDetector) {
+                        await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                        await faceapi.nets.faceLandmark64Net.loadFromUri(MODEL_URL);
+                        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                    } else {
+                        throw new Error("faceapi.nets に必要なモデルローダーが存在しません。");
+                    }
                 }
                 badge.innerText = "記憶を復元中";
                 await loadKnownFacesFromVault();
