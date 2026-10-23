@@ -114,7 +114,6 @@
             line-height: 1.5;
         }
 
-        /* PWAやモバイルで確実に動作させるためのビデオ要素スタイル調整 */
         #cameraStream {
             position: absolute;
             width: 1px;
@@ -280,6 +279,7 @@
         let currentKnownLocationName = "お出かけ先";
         let japaneseVoices = [];
         let selectedVoice = null;
+        let voicesInitialized = false; // 既定の取得完了フラグ
 
         let blinkTimer = null;
         let gazeTimer = null;
@@ -417,7 +417,7 @@
             };
 
             recognition.onerror = (event) => {
-                dbgLog(`[音声認識エラー] ${event.error}`, true);
+                dbgLog(`[音声エラー] ${event.error}`, true);
                 resetInteractionState(8000);
             };
 
@@ -435,7 +435,7 @@
                 dbgLog("音声認識オブジェクトが初期化されていません", true);
                 return;
             }
-            if (isListening || isSleeping) return;
+            if (isListening || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
             try {
                 isConversing = true; 
@@ -499,9 +499,21 @@
             setEmotion('Default');
             initVoices();
             if ('speechSynthesis' in window) {
-                window.speechSynthesis.onvoiceschanged = initVoices;
-                setTimeout(initVoices, 500);
-                setTimeout(initVoices, 1500);
+                // ブラウザの非同期通知イベントを活用
+                window.speechSynthesis.onvoiceschanged = () => {
+                    if (!voicesInitialized) initVoices();
+                };
+
+                // 取得できるまで最大5秒間だけ安全にポーリングし、取得できたら即座に停止する
+                let retryCount = 0;
+                const pollInterval = setInterval(() => {
+                    if (voicesInitialized || retryCount > 10) {
+                        clearInterval(pollInterval);
+                        return;
+                    }
+                    initVoices();
+                    retryCount++;
+                }, 500);
             }
             document.getElementById('statusIndicators').style.display = 'flex';
             updateIndicators();
@@ -509,19 +521,18 @@
         });
 
         function initVoices() {
+            if (voicesInitialized) return; // 既に初期化済みの場合は無駄な再処理をしない
             if (!('speechSynthesis' in window)) return;
             const voices = window.speechSynthesis.getVoices();
             if (!voices || voices.length === 0) return;
 
             japaneseVoices = voices.filter(v => v.lang && (v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')));
             if (japaneseVoices.length === 0) {
-                japaneseVoices = voices;
+                japaneseVoices = voices; // フォールバック
             }
             
             const select = document.getElementById('voiceSelect');
             if (select && japaneseVoices.length > 0) {
-                if (select.options.length === japaneseVoices.length) return;
-
                 select.innerHTML = '';
                 japaneseVoices.forEach((v, index) => {
                     const option = document.createElement('option');
@@ -533,15 +544,18 @@
                 const targetIndex = 0;
                 select.value = targetIndex;
                 selectedVoice = japaneseVoices[targetIndex];
-                dbgLog(`[音声初期選択] ${selectedVoice.name} (候補数: ${japaneseVoices.length})`);
+                voicesInitialized = true; // 成功フラグを立てて以降の重複処理を完全ブロック
+                dbgLog(`[音声リスト読込成功] ${japaneseVoices.length}件の音声が見つかりました（選択: ${selectedVoice.name}）`);
             }
         }
 
         function changeVoice(selectElement) {
             const index = selectElement.value;
             selectedVoice = japaneseVoices[index];
-            dbgLog(`[音声を手動変更] ${selectedVoice.name}`);
-            speak("この声にするね！", () => {});
+            if (selectedVoice) {
+                dbgLog(`[音声を手動変更] ${selectedVoice.name}`);
+                speak("この声にするね！", () => {});
+            }
         }
 
         // --- 瞬き（まばたき）処理 ---
@@ -823,7 +837,6 @@
                 const videoEl = document.getElementById('cameraStream');
                 videoEl.srcObject = stream;
                 
-                // PWAやモバイルブラウザで確実にビデオのロードと再生を完了させる
                 await new Promise((resolve) => {
                     videoEl.onloadedmetadata = () => {
                         videoEl.play().then(() => {
@@ -834,7 +847,6 @@
                             resolve();
                         });
                     };
-                    // すでにメタデータが読み込まれている場合の保険
                     if (videoEl.readyState >= 2) {
                         videoEl.play().catch(() => {});
                         resolve();
@@ -901,7 +913,7 @@
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
                     if (locResult.isKnown) {
-                        scheduleNextVisionCheck(3000); // 起動後少し早めに初回顔認証チェック
+                        scheduleNextVisionCheck(2000);
                     } else {
                         startListening();
                     }
@@ -994,7 +1006,6 @@
                 utterance.onend = () => {
                     stopLipSync();
                     if (callback) callback();
-                    setTimeout(startListening, 300);
                 };
                 utterance.onerror = () => {
                     stopLipSync();
@@ -1011,6 +1022,7 @@
             if (isSleeping || isConversing || isWaitingForName || isWaitingForLocationName) return;
             if (visionTimer) clearTimeout(visionTimer);
             visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, delay);
+            dbgLog(`[顔認識] 次回の顔認証チェックを ${delay/1000}秒後に予約しました`);
         }
 
         async function performFaceRecognitionCheck() {
@@ -1024,14 +1036,13 @@
             }
 
             try {
-                // デバッグ用に検出試行ログ
                 dbgLog("[顔認識] 顔検出を試行中...");
                 const detections = await faceapi.detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
 
                 if (!detections) {
                     dbgLog("[顔認識] 顔は検出されませんでした");
                     currentPresentPersons.clear();
-                    scheduleNextVisionCheck();
+                    scheduleNextVisionCheck(5000);
                     return;
                 }
 
@@ -1056,10 +1067,10 @@
                         setEmotion('Happy');
                         speak(`${bestMatchName}さん、こんにちは！`, () => {
                             setEmotion('Default');
-                            scheduleNextVisionCheck(15000);
+                            scheduleNextVisionCheck(10000);
                         });
                     } else {
-                        scheduleNextVisionCheck();
+                        scheduleNextVisionCheck(8000);
                     }
                 } else {
                     isConversing = true;
@@ -1077,6 +1088,7 @@
                     }, 25000);
 
                     speak("あれ？初めて見るお顔だね。お名前を教えて！", () => {});
+                    startListening();
                 }
 
             } catch (err) {
