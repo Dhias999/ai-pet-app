@@ -7,8 +7,8 @@
     <link rel="icon" href="data:,">
     <!-- PWA用マニフェストファイルのリンク -->
     <link rel="manifest" href="manifest.json">
-    <!-- face-api.js CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <!-- face-api.js CDN (unpkgに変更 & バージョン固定) -->
+    <script src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
     <style>
         body {
             margin: 0;
@@ -602,7 +602,7 @@
                         throw new Error("face-api.js の読み込みに失敗しました。ネットワーク接続を確認してください。");
                     }
 
-                    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+                    const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
                     await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceLandmark64Net.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
