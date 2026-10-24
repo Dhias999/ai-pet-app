@@ -294,7 +294,6 @@
         let envCheckTimer = null;
         let isSpeaking = false;
 
-        // 画像差分検出用キャッシュ
         let lastFrameImageData = null;
 
         function loadApiKey() {
@@ -345,14 +344,13 @@
             return null;
         }
 
-        // --- カメラ画像データ・ピクセル配列キャプチャ機能 ---
         function captureCameraFrame() {
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
                 return null;
             }
             const canvas = document.createElement('canvas');
-            canvas.width = 160; // 差分計算用に軽量化
+            canvas.width = 160;
             canvas.height = 120;
             const ctx = canvas.getContext('2d');
             ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
@@ -365,24 +363,21 @@
             };
         }
 
-        // --- 簡易ピクセル差分計算（動き・変化の検知） ---
         function calculateImageDifference(newPixels, oldPixels) {
-            if (!oldPixels || newPixels.length !== oldPixels.length) return 1.0; // 初回は100%扱い
+            if (!oldPixels || newPixels.length !== oldPixels.length) return 1.0;
             let diffCount = 0;
-            const threshold = 35; // 変化とみなす輝度閾値
+            const threshold = 35;
 
             for (let i = 0; i < newPixels.length; i += 4) {
-                // RGBAの平均値で簡易輝度比較
                 const avgNew = (newPixels[i] + newPixels[i+1] + newPixels[i+2]) / 3;
                 const avgOld = (oldPixels[i] + oldPixels[i+1] + oldPixels[i+2]) / 3;
                 if (Math.abs(avgNew - avgOld) > threshold) {
                     diffCount++;
                 }
             }
-            return diffCount / (newPixels.length / 4); // 画面全体に対する変化率 (0.0 ～ 1.0)
+            return diffCount / (newPixels.length / 4);
         }
 
-        // --- 周囲環境の自動判定（統合コンテキスト＆差分検知付き） ---
         async function analyzeEnvironment() {
             if (isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
@@ -393,7 +388,6 @@
                 return;
             }
 
-            // 1. 前回画像との差分チェック（5%以上の変化があった場合のみ送信）
             const diffRatio = calculateImageDifference(frame.rawPixels, lastFrameImageData);
             lastFrameImageData = frame.rawPixels;
 
@@ -410,13 +404,12 @@
 
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-            // 2. 顔認識・位置情報の統合コンテキスト構築
             const presentPersonsArray = Array.from(currentPresentPersons);
             const personContext = presentPersonsArray.length > 0 
                 ? presentPersonsArray.join('さん、') + 'さん' 
                 : '誰もいない（または特定できない）';
 
-            const systemInstruction = `あなたはAIペットです。現在の状態と送られたカメラ画像を見て、周りの状況（明るさ、出来事、周囲の物体、ユーザーの動作など）を観察し、独り言として話しかけてください。
+            const systemInstruction = `あなたはAIペットです。現在の状態と送られたカメラ画像を見て、周りの状況（明るさ、出来事、周囲の物体、持ち物、ユーザーの動作など）を観察し、独り言として話しかけてください。
 
 【現在の統合メタデータ】
 - 現在地: ${currentKnownLocationName}
@@ -450,8 +443,9 @@
                 ]
             };
 
+            // タイムアウト設定を 15秒 (15000ms) に延長
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 8000);
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
 
             try {
                 dbgLog("[環境分析] 周囲の画像をGeminiマルチモーダルへ送信中...");
@@ -480,7 +474,6 @@
                             chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
                         }
 
-                        // 3. エピソード（Episodes/）へ自動ログ保存
                         await saveEpisodeToVault(
                             "環境の自動観察",
                             `カメラで周囲の様子を察知して発話した: 「${parsed.text}」`,
@@ -498,7 +491,9 @@
                 }
             } catch (err) {
                 clearTimeout(timeoutId);
-                dbgLog(`[環境分析エラー] ${err.message}`, true);
+                const isAbort = err.name === 'AbortError';
+                const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
+                dbgLog(`[環境分析エラー] ${errorReason}`, true);
             }
 
             scheduleNextEnvCheck(45000);
@@ -617,7 +612,6 @@ Default: その他通常会話`;
             dbgLog("[SYSTEM] インタラクション状態をリセットしました");
         }
 
-        // --- 音声認識（SpeechRecognition）処理 ---
         function createRecognitionInstance() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
