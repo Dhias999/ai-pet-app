@@ -300,7 +300,7 @@
             dbgLog("[SYSTEM] インタラクション状態をリセットし、顔認証ループに復帰しました");
         }
 
-        // --- 音声認識（SpeechRecognition）のファクトリー＆動的生成関数 ---
+        // --- 音声認識（SpeechRecognition）の動的生成関数 ---
         function createRecognitionInstance() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
@@ -377,7 +377,7 @@
                     const hasSuffix = suffixes.some(suffix => personName.endsWith(suffix));
                     const speakName = hasSuffix ? personName : `${personName}さん`;
 
-                    speak(`🎵 「${speakName}」だね。覚えたよ！`, async () => {
+                    speak(`「${speakName}」だね。覚えたよ！`, async () => {
                         await savePersonToVault(personName, pendingFaceDescriptor);
                         currentPresentPersons.add(personName);
                         setEmotion('Happy');
@@ -436,11 +436,10 @@
         let recognitionInstance = null;
 
         function startListening() {
-            if (isListening || isSleeping || isWaitingForName || isWaitingForLocationName) return;
+            if (isListening || isSleeping) return;
 
             try {
                 isConversing = true;
-                // 毎回クリーンな認識インスタンスを生成してPWAでのロックを回避
                 if (recognitionInstance) {
                     try { recognitionInstance.stop(); } catch(e) {}
                 }
@@ -804,7 +803,7 @@
             currentKnownLocationName = locationName;
         }
 
-        // --- アクティベーション（PWAカメラ・ファイル権限の取得） ---
+        // --- アクティベーション（PWAマイク・カメラ・ファイル権限の一括取得） ---
         async function triggerActivation() {
             if (isActivated) return;
 
@@ -832,6 +831,17 @@
                     window.speechSynthesis.cancel();
                     const dummy = new SpeechSynthesisUtterance("");
                     window.speechSynthesis.speak(dummy);
+                }
+
+                // ★ PWAでのマイク権限をユーザージェスチャ内で確実に確立する
+                badge.innerText = "マイク確認中";
+                dbgLog("マイク（音声入力）の権限を要求中...");
+                try {
+                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    audioStream.getTracks().forEach(track => track.stop());
+                    dbgLog("マイクのパーミッション取得成功");
+                } catch (micErr) {
+                    dbgLog(`[マイク警告] ${micErr.message}`, true);
                 }
 
                 badge.innerText = "カメラ起動中";
@@ -905,11 +915,7 @@
 
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
-                    if (locResult.isKnown) {
-                        scheduleNextVisionCheck(2000);
-                    } else {
-                        startListening();
-                    }
+                    scheduleNextVisionCheck(2000);
                 });
 
             } catch (err) {
@@ -1033,7 +1039,7 @@
                 const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
                 if (!detections) {
-                    dbgLog("[顔認識] 顔は検出されませんでした（カメラの向きや明るさを確認してください）");
+                    dbgLog("[顔認識] 顔は検出されませんでした");
                     currentPresentPersons.clear();
                     scheduleNextVisionCheck(3000);
                     return;
@@ -1058,30 +1064,42 @@
                         currentPresentPersons.add(bestMatchName);
                         dbgLog(`[顔認識] ${bestMatchName} さんを認識しました`);
                         setEmotion('Happy');
-                        speak(`${bestMatchName}さん、こんにちは！`, () => {
+                        
+                        // ★ 既知の顔を検知した場合：挨拶したあとに自動で音声入力（おしゃべり待ち）へ繋げる
+                        speak(`${bestMatchName}さん、こんにちは！何かお話する？`, () => {
                             setEmotion('Default');
-                            scheduleNextVisionCheck(10000);
+                            // 自動開始の制限（PWAセキュリティ）を回避するため、もし自動開始がブロックされる場合は画面タップを促すメッセージにするが、
+                            // ユーザー操作直後（挨拶中など）はセッションが通ることがあるため自動で startListening() を呼び出す
+                            try {
+                                startListening();
+                            } catch(e) {
+                                dbgLog("[案内] 音声入力の自動開始が制限されたため、画面をタップしてね");
+                                scheduleNextVisionCheck(10000);
+                            }
                         });
                     } else {
                         scheduleNextVisionCheck(8000);
                     }
                 } else {
+                    // 未知の顔を検知した場合
                     isConversing = true;
                     setEmotion('Surprised');
-                    
                     pendingFaceDescriptor = currentDescriptor;
                     isWaitingForName = true;
 
                     if (safetyTimeout) clearTimeout(safetyTimeout);
                     safetyTimeout = setTimeout(() => {
                         if (isWaitingForName) {
-                            dbgLog("[警告] 名前入力待ちがタイムアウトしました。通常の監視に戻ります", true);
+                            dbgLog("[警告] 名前入力待ちがタイムアウトしました", true);
                             resetInteractionState(5000);
                         }
                     }, 25000);
 
-                    speak("あれ？初めて見るお顔だね。お名前を教えて！", () => {});
-                    startListening();
+                    const unknownMsg = "あれ？初めて見るお顔だね。お名前を教えて！画面をタップして教えてね。";
+                    const chatLog = document.getElementById('chatLog');
+                    if (chatLog) chatLog.innerHTML = `<strong>ペット:</strong> ${unknownMsg}`;
+
+                    speak(unknownMsg, () => {});
                 }
 
             } catch (err) {
@@ -1090,6 +1108,7 @@
             }
         }
 
+        // --- 画面（ペットステージ）タップ時の動作 ---
         function handleStageClick() {
             if (isSleeping) {
                 isSleeping = false;
@@ -1100,7 +1119,23 @@
                 return;
             }
 
-            dbgLog("画面タップによる音声入力を開始します");
+            if (isWaitingForName) {
+                dbgLog("画面タップにより名前の音声入力を開始します");
+                speak("うん、お名前は何て言うの？", () => {
+                    startListening();
+                });
+                return;
+            }
+
+            if (isWaitingForLocationName) {
+                dbgLog("画面タップにより場所名の音声入力を開始します");
+                speak("ここはなんて名前の場所かな？", () => {
+                    startListening();
+                });
+                return;
+            }
+
+            dbgLog("画面タップによる通常会話の音声入力を開始します");
             speak("なあに？お話を聞くよ。", () => {
                 startListening();
             });
