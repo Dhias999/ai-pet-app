@@ -277,6 +277,7 @@
         let knownFaces = []; 
         let knownLocations = []; 
         let currentPresentPersons = new Set(); 
+        let personSeenTimestamps = new Map(); 
 
         let isWaitingForLocationName = false;
         let pendingLocationCoords = null;
@@ -555,24 +556,46 @@
             envCheckTimer = setTimeout(analyzeEnvironment, delay);
         }
 
-        // 音声テキストから人物名・場所名を検知し、関連する過去エピソードを検索・抽出する関数
+        // 単語部分誤検知を防ぐ精度向上チェック関数
+        function isExactWordMatch(text, targetName) {
+            if (!text || !targetName) return false;
+
+            if (targetName.length >= 4) {
+                return text.includes(targetName);
+            }
+
+            const escapedName = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const pattern = new RegExp(`${escapedName}(さん|ちゃん|くん|様|が|は|に|と|の|を|って|だ|よ|？|！|\\s|$)`);
+            return pattern.test(text);
+        }
+
+        // 直近30日以内のエピソードファイルから関連ログを検索・抽出する関数
         async function searchRelatedEpisodes(userText) {
             if (!vaultDirHandle || !userText) return "";
 
-            const matchedPersons = knownFaces.map(f => f.name).filter(name => userText.includes(name));
-            const matchedLocations = knownLocations.map(l => l.name).filter(name => userText.includes(name));
+            const matchedPersons = knownFaces.map(f => f.name).filter(name => isExactWordMatch(userText, name));
+            const matchedLocations = knownLocations.map(l => l.name).filter(name => isExactWordMatch(userText, name));
 
             if (matchedPersons.length === 0 && matchedLocations.length === 0) {
                 return "";
             }
 
             let extractedEpisodes = [];
+            const now = new Date();
+            const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
 
             try {
                 const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
 
                 for await (const [name, handle] of dirHandle.entries()) {
                     if (handle.kind === 'file' && name.endsWith('.md')) {
+                        const datePart = name.replace('.md', '');
+                        const fileDate = new Date(datePart);
+
+                        if (isNaN(fileDate.getTime()) || fileDate < thirtyDaysAgo) {
+                            continue;
+                        }
+
                         const file = await handle.getFile();
                         const text = await file.text();
 
@@ -585,7 +608,7 @@
                         for (const block of blocks) {
                             const hasMatch = targets.some(target => block.includes(target));
                             if (hasMatch) {
-                                const datePrefix = `[日付: ${name.replace('.md', '')}]`;
+                                const datePrefix = `[日付: ${datePart}]`;
                                 extractedEpisodes.push(`${datePrefix}\n${block.trim()}`);
                             }
                         }
@@ -597,13 +620,12 @@
 
             if (extractedEpisodes.length === 0) return "";
 
-            const recentRelated = extractedEpisodes.slice(-3).join('\n\n');
-            dbgLog(`[関連エピソード参照] ${matchedPersons.concat(matchedLocations).join(', ')} に関する過去ログ ${extractedEpisodes.length}件 を検出しました`);
+            const recentRelated = extractedEpisodes.slice(-4).join('\n\n');
+            dbgLog(`[関連エピソード参照(直近30日)] ${matchedPersons.concat(matchedLocations).join(', ')} に関する過去ログ ${extractedEpisodes.length}件 を検出しました`);
 
             return recentRelated;
         }
 
-        // 直前の発話(previousPetSpeech)、当日のログ(todayContext)、関連過去ログ(relatedContext)をGeminiへ送信
         async function callGeminiAPI(userPrompt, previousPetSpeech = "", todayContext = "", relatedContext = "", maxRetries = 3) {
             if (isApiProcessing) {
                 dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
@@ -621,11 +643,11 @@
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
-            const episodeText = todayContext ? `【本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
-            const relatedText = relatedContext ? `【検出された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
+            const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
+            const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
 
             const systemInstruction = `あなたは可愛らしいAIペットです。
-これまでの本日のエピソード、検出された過去の記憶（人物や場所に関する情報）、および直前の問いかけを踏まえて、ユーザーの発言に対して自然に文脈や記憶を繋げて回答してください。
+これまでの本日のエピソード、検索された過去の記憶（人物や場所に関する情報）、および直前の問いかけを踏まえて、ユーザーの発言に対して自然に文脈や記憶を繋げて回答してください。
 
 ${episodeText}
 ${relatedText}
@@ -822,6 +844,7 @@ Default: その他通常会話`;
                     speak(`「${speakName}」だね。覚えたよ！`, async () => {
                         await savePersonToVault(personName, pendingFaceDescriptor);
                         currentPresentPersons.add(personName);
+                        personSeenTimestamps.set(personName, Date.now());
                         setEmotion('Happy');
                         setTimeout(() => {
                             resetInteractionState(15000);
@@ -858,10 +881,19 @@ Default: その他通常会話`;
                 }
 
                 if (IS_AI_MODE) {
-                    // 1. 本日のエピソードログを取得
+                    // 精度の高い境界単語マッチングを用いて登録人物名を自動補完
+                    knownFaces.forEach(f => {
+                        if (isExactWordMatch(rawTranscript, f.name)) {
+                            currentPresentPersons.add(f.name);
+                            personSeenTimestamps.set(f.name, Date.now());
+                            dbgLog(`[コンテキスト自動補完] テキストから人物「${f.name}」を正確に検出し設定しました`);
+                        }
+                    });
+
+                    // 1. 直近のエピソードログを取得
                     const todayContext = await getTodayEpisodeText();
 
-                    // 2. 音声テキストから関連する過去エピソード（人物・場所）を検索
+                    // 2. 音声テキストから直近30日以内の関連過去エピソード（人物・場所）を検索
                     const relatedContext = await searchRelatedEpisodes(rawTranscript);
 
                     // 3. 直前発話 + 当日ログ + 関連過去ログをセットでGeminiへ渡し、回答を得る
@@ -1165,14 +1197,32 @@ Default: その他通常会話`;
 
         async function getTodayEpisodeText() {
             if (!vaultDirHandle) return "";
-            const dateStr = new Date().toISOString().split('T')[0];
+            const now = new Date();
+            const dateStr = now.toISOString().split('T')[0];
             const filename = `${dateStr}.md`;
+
+            let combinedText = "";
 
             try {
                 const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
-                const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
-                const file = await fileHandle.getFile();
-                return await file.text();
+                
+                if (now.getHours() < 5) {
+                    const yesterday = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+                    const prevFilename = `${yesterday.toISOString().split('T')[0]}.md`;
+                    try {
+                        const prevHandle = await dirHandle.getFileHandle(prevFilename, { create: false });
+                        const prevFile = await prevHandle.getFile();
+                        combinedText += await prevFile.text() + "\n\n";
+                    } catch (e) {}
+                }
+
+                try {
+                    const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
+                    const file = await fileHandle.getFile();
+                    combinedText += await file.text();
+                } catch (e) {}
+
+                return combinedText;
             } catch (err) {
                 return "";
             }
@@ -1708,11 +1758,17 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
                 const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
-                if (!detections) {
-                    if (currentPresentPersons.size > 0) {
-                        dbgLog("[顔認識] 画面内から人がいなくなりました");
-                        currentPresentPersons.clear();
+                const now = Date.now();
+
+                for (const [name, lastSeen] of personSeenTimestamps.entries()) {
+                    if (now - lastSeen > 3 * 60 * 1000) {
+                        currentPresentPersons.delete(name);
+                        personSeenTimestamps.delete(name);
+                        dbgLog(`[人物退出検知] ${name} さんが画面から見なくなって3分経過したため退出処理しました`);
                     }
+                }
+
+                if (!detections) {
                     scheduleNextVisionCheck(5000);
                     return;
                 }
@@ -1731,6 +1787,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 }
 
                 if (bestMatchName) {
+                    personSeenTimestamps.set(bestMatchName, now);
+
                     if (currentPresentPersons.has(bestMatchName)) {
                         dbgLog(`[顔認識] ${bestMatchName} さんは滞在地です（チェック一時保留）`);
                         scheduleNextVisionCheck(20000);
