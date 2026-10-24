@@ -300,6 +300,10 @@
         let wakeLockObj = null;
 
         let lastFrameImageData = null;
+        
+        // 音声認識の自動リトライ制御フラグ
+        let hasRecognizedResult = false;
+        let silenceRetryCount = 0;
 
         async function requestWakeLock() {
             try {
@@ -556,7 +560,6 @@
             envCheckTimer = setTimeout(analyzeEnvironment, delay);
         }
 
-        // 単語部分誤検知を防ぐ精度向上チェック関数
         function isExactWordMatch(text, targetName) {
             if (!text || !targetName) return false;
 
@@ -569,7 +572,6 @@
             return pattern.test(text);
         }
 
-        // 直近30日以内のエピソードファイルから関連ログを検索・抽出する関数
         async function searchRelatedEpisodes(userText) {
             if (!vaultDirHandle || !userText) return "";
 
@@ -746,6 +748,7 @@ Default: その他通常会話`;
             isConversing = false;
             pendingFaceDescriptor = null;
             pendingLocationCoords = null;
+            silenceRetryCount = 0;
             if (safetyTimeout) {
                 clearTimeout(safetyTimeout);
                 safetyTimeout = null;
@@ -770,6 +773,7 @@ Default: その他通常会話`;
 
             rec.onstart = () => {
                 isListening = true;
+                hasRecognizedResult = false;
                 updateIndicators();
                 dbgLog("[音声認識] 聞き取り中...");
                 
@@ -784,6 +788,8 @@ Default: その他通常会話`;
             };
 
             rec.onresult = async (event) => {
+                hasRecognizedResult = true;
+                silenceRetryCount = 0;
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
                 const rawTranscript = event.results[0][0].transcript.trim();
@@ -881,7 +887,6 @@ Default: その他通常会話`;
                 }
 
                 if (IS_AI_MODE) {
-                    // 精度の高い境界単語マッチングを用いて登録人物名を自動補完
                     knownFaces.forEach(f => {
                         if (isExactWordMatch(rawTranscript, f.name)) {
                             currentPresentPersons.add(f.name);
@@ -890,13 +895,8 @@ Default: その他通常会話`;
                         }
                     });
 
-                    // 1. 直近のエピソードログを取得
                     const todayContext = await getTodayEpisodeText();
-
-                    // 2. 音声テキストから直近30日以内の関連過去エピソード（人物・場所）を検索
                     const relatedContext = await searchRelatedEpisodes(rawTranscript);
-
-                    // 3. 直前発話 + 当日ログ + 関連過去ログをセットでGeminiへ渡し、回答を得る
                     const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech, todayContext, relatedContext);
                     
                     if (chatLog) {
@@ -937,6 +937,17 @@ Default: その他通常会話`;
                 isListening = false;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
+
+                // 無音状態で自動終了し、発話未検出かつ会話継続中の場合は最大1回まで自動リトライ
+                if (!hasRecognizedResult && (isConversing || isWaitingForName || isWaitingForLocationName) && silenceRetryCount < 1) {
+                    silenceRetryCount++;
+                    dbgLog(`[無音検知リトライ] 音声が検出されなかったため自動で聞き取りを再開します (${silenceRetryCount}/1)`);
+                    setTimeout(() => {
+                        if (!isListening && (isConversing || isWaitingForName || isWaitingForLocationName)) {
+                            startListening();
+                        }
+                    }, 400);
+                }
             };
 
             return rec;
@@ -1703,10 +1714,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     stopLipSync();
 
                     if (!isSleeping && isQuestionText(text)) {
-                        dbgLog("[質問検知] 疑問形の発話が完了したため、600ms後に自動で音声入力を開始します");
+                        dbgLog("[質問検知] 疑問形の発話が完了したため、1200ms後に自動で音声入力を開始します");
                         setTimeout(() => {
                             startListening();
-                        }, 600);
+                        }, 1200);
                     } else if (callback) {
                         callback();
                     }
