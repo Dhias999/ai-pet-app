@@ -292,7 +292,7 @@
         let safetyTimeout = null;
         let envCheckTimer = null;
         let isSpeaking = false;
-        let lastPetSpeech = ""; // 直前のペットの発話内容を保持する変数
+        let lastPetSpeech = ""; 
 
         let isApiProcessing = false;
         let envCheckBackoffDelay = 60000;
@@ -555,8 +555,56 @@
             envCheckTimer = setTimeout(analyzeEnvironment, delay);
         }
 
-        // 直前のペットの発話(previousPetSpeech)をコンテキストに含めてGeminiへリクエストを送信
-        async function callGeminiAPI(userPrompt, previousPetSpeech = "", maxRetries = 3) {
+        // 音声テキストから人物名・場所名を検知し、関連する過去エピソードを検索・抽出する関数
+        async function searchRelatedEpisodes(userText) {
+            if (!vaultDirHandle || !userText) return "";
+
+            const matchedPersons = knownFaces.map(f => f.name).filter(name => userText.includes(name));
+            const matchedLocations = knownLocations.map(l => l.name).filter(name => userText.includes(name));
+
+            if (matchedPersons.length === 0 && matchedLocations.length === 0) {
+                return "";
+            }
+
+            let extractedEpisodes = [];
+
+            try {
+                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
+
+                for await (const [name, handle] of dirHandle.entries()) {
+                    if (handle.kind === 'file' && name.endsWith('.md')) {
+                        const file = await handle.getFile();
+                        const text = await file.text();
+
+                        const targets = [
+                            ...matchedPersons.map(p => `[[${p}]]`),
+                            ...matchedLocations.map(l => `[[${l}]]`)
+                        ];
+
+                        const blocks = text.split('\n---\n');
+                        for (const block of blocks) {
+                            const hasMatch = targets.some(target => block.includes(target));
+                            if (hasMatch) {
+                                const datePrefix = `[日付: ${name.replace('.md', '')}]`;
+                                extractedEpisodes.push(`${datePrefix}\n${block.trim()}`);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                dbgLog(`[関連エピソード検索エラー] ${err.message}`, true);
+            }
+
+            if (extractedEpisodes.length === 0) return "";
+
+            const recentRelated = extractedEpisodes.slice(-3).join('\n\n');
+            dbgLog(`[関連エピソード参照] ${matchedPersons.concat(matchedLocations).join(', ')} に関する過去ログ ${extractedEpisodes.length}件 を検出しました`);
+
+            return recentRelated;
+        }
+
+        // 直前の発話(previousPetSpeech)、当日のログ(todayContext)、関連過去ログ(relatedContext)をGeminiへ送信
+        async function callGeminiAPI(userPrompt, previousPetSpeech = "", todayContext = "", relatedContext = "", maxRetries = 3) {
             if (isApiProcessing) {
                 dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
                 return { emotion: 'Sad', text: "ちょっと待ってね、考え中だよ。" };
@@ -573,9 +621,17 @@
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
+            const episodeText = todayContext ? `【本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
+            const relatedText = relatedContext ? `【検出された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
 
             const systemInstruction = `あなたは可愛らしいAIペットです。
-直前の自分の問いかけや発話を踏まえて、ユーザーの返答に対して自然に文脈を繋げて回答してください。
+これまでの本日のエピソード、検出された過去の記憶（人物や場所に関する情報）、および直前の問いかけを踏まえて、ユーザーの発言に対して自然に文脈や記憶を繋げて回答してください。
+
+${episodeText}
+${relatedText}
+${contextText}
+
+【ユーザーの発言】: 「${userPrompt}」
 
 フォーマット:
 {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}
@@ -592,7 +648,7 @@ Default: その他通常会話`;
                     {
                         role: "user",
                         parts: [
-                            { text: `${systemInstruction}\n\n${contextText}【ユーザーの発言】: 「${userPrompt}」` }
+                            { text: systemInstruction }
                         ]
                     }
                 ]
@@ -604,7 +660,7 @@ Default: その他通常会話`;
                     const timeoutId = setTimeout(() => controller.abort(), 7000);
 
                     try {
-                        dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}" (直前発話: "${previousPetSpeech}")`);
+                        dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
                         const response = await fetch(endpoint, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -802,8 +858,14 @@ Default: その他通常会話`;
                 }
 
                 if (IS_AI_MODE) {
-                    // 直前のペットの発話 (lastPetSpeech) を渡して返答を生成
-                    const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech);
+                    // 1. 本日のエピソードログを取得
+                    const todayContext = await getTodayEpisodeText();
+
+                    // 2. 音声テキストから関連する過去エピソード（人物・場所）を検索
+                    const relatedContext = await searchRelatedEpisodes(rawTranscript);
+
+                    // 3. 直前発話 + 当日ログ + 関連過去ログをセットでGeminiへ渡し、回答を得る
+                    const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech, todayContext, relatedContext);
                     
                     if (chatLog) {
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
@@ -1566,10 +1628,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             return questionRegex.test(text.trim());
         }
 
-        // 発話関数: ペットの発話を lastPetSpeech へ記録
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
-            lastPetSpeech = text; // 直前の発話ログを更新
+            lastPetSpeech = text; 
 
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
