@@ -352,7 +352,7 @@
             return null;
         }
 
-        // --- Gemini API 呼び出し（感情判別付き） ---
+        // --- Gemini API 呼び出し（感情判別付き・最新モデル適用版） ---
         async function callGeminiAPI(userPrompt) {
             const apiKey = loadApiKey();
             if (!apiKey) {
@@ -360,22 +360,23 @@
                 return { emotion: 'Sad', text: "APIキーが設定されていないみたい。" };
             }
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            // 最新モデル (gemini-3.8-flash) に更新
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSONフォーマットのみを出力してください。他のテキストやマークダウン表記（\`\`\`json など）は一切含めないでください。
 
-フォーマット:
-{
-  "emotion": "Happy" | "Anger" | "Surprised" | "Sad" | "Default",
-  "text": "40文字以内の明るく親しみやすい返答"
-}
+        フォーマット:
+        {
+        "emotion": "Happy" | "Anger" | "Surprised" | "Sad" | "Default",
+        "text": "40文字以内の明るく親しみやすい返答"
+        }
 
-感情の基準:
-- Happy: 嬉しい、楽しい、褒められた、親しい挨拶
-- Anger: 怒られた、意地悪された、嫌なことを言われた
-- Surprised: 驚いた、ビックリするニュース、珍しいこと
-- Sad: 悲しい話、バイバイのお別れ、寂しいとき
-- Default: 通常の日常会話や質問回答`;
+        感情の基準:
+        - Happy: 嬉しい、楽しい、褒められた、親しい挨拶
+        - Anger: 怒られた、意地悪された、嫌なことを言われた
+        - Surprised: 驚いた、ビックリするニュース、珍しいこと
+        - Sad: 悲しい話、バイバイのお別れ、寂しいとき
+        - Default: 通常の日常会話や質問回答`;
 
             const payload = {
                 contents: [
@@ -423,7 +424,6 @@
                 };
             }
         }
-
         function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
             isWaitingForLocationName = false;
