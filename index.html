@@ -292,6 +292,7 @@
         let safetyTimeout = null;
         let envCheckTimer = null;
         let isSpeaking = false;
+        let lastPetSpeech = ""; // 直前のペットの発話内容を保持する変数
 
         let isApiProcessing = false;
         let envCheckBackoffDelay = 60000;
@@ -416,7 +417,6 @@
             return diffCount / (newPixels.length / 4);
         }
 
-        // 環境の自動観察（独り言）処理 - こちらは保存対象として維持
         async function analyzeEnvironment() {
             if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
@@ -523,7 +523,6 @@
                             chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
                         }
 
-                        // 環境の自動観察はライフログとして意味があるためVaultへ記録
                         await saveEpisodeToVault(
                             "環境の自動観察",
                             `カメラで周囲の様子を察知して発話した: 「${parsed.text}」`,
@@ -556,7 +555,8 @@
             envCheckTimer = setTimeout(analyzeEnvironment, delay);
         }
 
-        async function callGeminiAPI(userPrompt, maxRetries = 3) {
+        // 直前のペットの発話(previousPetSpeech)をコンテキストに含めてGeminiへリクエストを送信
+        async function callGeminiAPI(userPrompt, previousPetSpeech = "", maxRetries = 3) {
             if (isApiProcessing) {
                 dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
                 return { emotion: 'Sad', text: "ちょっと待ってね、考え中だよ。" };
@@ -572,7 +572,10 @@
 
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-            const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
+            const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
+
+            const systemInstruction = `あなたは可愛らしいAIペットです。
+直前の自分の問いかけや発話を踏まえて、ユーザーの返答に対して自然に文脈を繋げて回答してください。
 
 フォーマット:
 {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}
@@ -589,7 +592,7 @@ Default: その他通常会話`;
                     {
                         role: "user",
                         parts: [
-                            { text: `${systemInstruction}\n\nユーザーの発言: ${userPrompt}` }
+                            { text: `${systemInstruction}\n\n${contextText}【ユーザーの発言】: 「${userPrompt}」` }
                         ]
                     }
                 ]
@@ -601,7 +604,7 @@ Default: その他通常会話`;
                     const timeoutId = setTimeout(() => controller.abort(), 7000);
 
                     try {
-                        dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
+                        dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}" (直前発話: "${previousPetSpeech}")`);
                         const response = await fetch(endpoint, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -799,13 +802,13 @@ Default: その他通常会話`;
                 }
 
                 if (IS_AI_MODE) {
-                    const aiResult = await callGeminiAPI(rawTranscript);
+                    // 直前のペットの発話 (lastPetSpeech) を渡して返答を生成
+                    const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech);
                     
                     if (chatLog) {
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
-                    // ★ 通信エラー応答メッセージ（「ごめんね、通信が混雑…」等）は Vault に記録しない
                     const isErrorMessage = aiResult.text.includes("通信が混雑") || aiResult.text.includes("考えられなかった");
 
                     if (!isErrorMessage) {
@@ -1563,8 +1566,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             return questionRegex.test(text.trim());
         }
 
+        // 発話関数: ペットの発話を lastPetSpeech へ記録
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
+            lastPetSpeech = text; // 直前の発話ログを更新
 
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
@@ -1704,7 +1709,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                             chatLog.innerHTML += `<br><strong>ペット:</strong> ${topicResult.text}`;
                         }
 
-                        // ★ ログ抑制: 一方的な話しかけである「再会時の話題」は Vault に保存しない
                         dbgLog("[ログ制御] 再会時の話題発話のため Vault 保存をスキップします");
 
                         speak(topicResult.text, () => {
