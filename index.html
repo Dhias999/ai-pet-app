@@ -242,7 +242,7 @@
         </div>
     </div>
 
-    <!-- コントロールパネル（音声選択＆APIキー＆ログ） -->
+    <!-- コントロールパネル -->
     <div id="controlPanel" class="control-panel">
         <div>
             <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">Gemini API キー:</label>
@@ -309,7 +309,7 @@
             return savedKey;
         }
 
-        // --- Settings/API_KEY.md へのAPIキー自動保存・設置 ---
+        // --- Settings/API_KEY.md へのAPIキー自動保存 ---
         async function saveApiKeyToVault(key) {
             if (!vaultDirHandle || !key) return;
             try {
@@ -321,12 +321,12 @@
                 await writable.close();
 
                 localStorage.setItem('gemini_api_key', key.trim());
-                dbgLog("[API KEY] Settings/API_KEY.md へ正常に自動設置しました");
+                dbgLog("[API KEY] Settings/API_KEY.md へ正常に保存しました");
                 
                 const inputEl = document.getElementById('geminiApiKey');
                 if (inputEl) inputEl.value = key.trim();
             } catch (err) {
-                dbgLog(`[API KEY] 自動設置失敗: ${err.message}`, true);
+                dbgLog(`[API KEY] 保存失敗: ${err.message}`, true);
             }
         }
 
@@ -352,18 +352,31 @@
             return null;
         }
 
-        // --- Gemini API 呼び出し処理 ---
+        // --- Gemini API 呼び出し（感情判別付き） ---
         async function callGeminiAPI(userPrompt) {
             const apiKey = loadApiKey();
             if (!apiKey) {
                 dbgLog("[API Error] APIキーが未設定です", true);
-                return "APIキーが設定されていないみたい。デバッグパネルで登録してね！";
+                return { emotion: 'Sad', text: "APIキーが設定されていないみたい。" };
             }
 
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
-            const systemInstruction = "あなたはフレンドリーで可愛らしいAIペットです。ユーザーの言葉に対して、短く（40文字以内）、明るく親しみやすい言葉遣い（〜だよ、〜かな？など）で答えてください。";
-            
+            const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSONフォーマットのみを出力してください。他のテキストやマークダウン表記（\`\`\`json など）は一切含めないでください。
+
+フォーマット:
+{
+  "emotion": "Happy" | "Anger" | "Surprised" | "Sad" | "Default",
+  "text": "40文字以内の明るく親しみやすい返答"
+}
+
+感情の基準:
+- Happy: 嬉しい、楽しい、褒められた、親しい挨拶
+- Anger: 怒られた、意地悪された、嫌なことを言われた
+- Surprised: 驚いた、ビックリするニュース、珍しいこと
+- Sad: 悲しい話、バイバイのお別れ、寂しいとき
+- Default: 通常の日常会話や質問回答`;
+
             const payload = {
                 contents: [
                     {
@@ -389,17 +402,25 @@
                 }
 
                 const data = await response.json();
-                const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                
+                // マークダウンのクリーンアップ
+                rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
-                if (aiText) {
-                    dbgLog(`[Gemini レスポンス受信] "${aiText}"`);
-                    return aiText;
-                } else {
-                    throw new Error("応答テキストの取得に失敗しました");
-                }
+                dbgLog(`[Gemini 生レスポンス] ${rawText}`);
+
+                const parsed = JSON.parse(rawText);
+                return {
+                    emotion: parsed.emotion || 'Happy',
+                    text: parsed.text || "うまく返事できなかったよ。"
+                };
+
             } catch (err) {
-                dbgLog(`[Gemini APIエラー] ${err.message}`, true);
-                return "ごめんね、うまくお返事が考えられなかったよ。";
+                dbgLog(`[Gemini APIエラー/解析例外] ${err.message}`, true);
+                return {
+                    emotion: 'Default',
+                    text: "ごめんね、うまくお返事が考えられなかったよ。"
+                };
             }
         }
 
@@ -418,7 +439,7 @@
             dbgLog("[SYSTEM] インタラクション状態をリセットし、顔認証ループに復帰しました");
         }
 
-        // --- 音声認識（SpeechRecognition）の動的生成関数 ---
+        // --- 音声認識（SpeechRecognition）処理 ---
         function createRecognitionInstance() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
@@ -458,7 +479,6 @@
                     chatLog.innerHTML = `<strong>あなた:</strong> ${rawTranscript}`;
                 }
 
-                // ★ 「デバッグ」の判定（トグル切り替え）
                 if (transcript.includes('デバッグ') || transcript.includes('でばっぐ') || transcript.includes('debug')) {
                     const panel = document.getElementById('controlPanel');
                     if (panel) {
@@ -476,7 +496,6 @@
                     return;
                 }
 
-                // ★ 新しい人物の名前を待っている状態の場合の処理
                 if (isWaitingForName) {
                     isWaitingForName = false;
                     const transcriptClean = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
@@ -507,7 +526,6 @@
                     return;
                 }
 
-                // ★ 場所の名前を待っている状態の場合の処理
                 if (isWaitingForLocationName) {
                     isWaitingForLocationName = false;
                     const locationName = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
@@ -535,16 +553,18 @@
                     return;
                 }
 
-                // ★ AI 会話受け答え処理（Gemini API 呼び出し）
+                // ★ Gemini 応答生成と表情切り替え
                 if (IS_AI_MODE) {
-                    setEmotion('Happy');
-                    const aiReply = await callGeminiAPI(rawTranscript);
+                    const aiResult = await callGeminiAPI(rawTranscript);
                     
                     if (chatLog) {
-                        chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiReply}`;
+                        chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
-                    speak(aiReply, () => {
+                    // 取得した感情（Anger / Surprised / Happy / Sad / Default）を顔に反映
+                    setEmotion(aiResult.emotion);
+
+                    speak(aiResult.text, () => {
                         resetInteractionState(8000);
                     });
                     return;
@@ -938,7 +958,7 @@
             currentKnownLocationName = locationName;
         }
 
-        // --- アクティベーション（PWAマイク・カメラ・ファイル権限の一括取得＆キー初会自動判定） ---
+        // --- アクティベーション ---
         async function triggerActivation() {
             if (isActivated) return;
 
@@ -1035,7 +1055,6 @@
                 await loadKnownFacesFromVault();
                 await loadKnownLocationsFromVault();
 
-                // ★ 初回起動時の API_KEY.md チェック＆自動生成ダイアログフロー
                 badge.innerText = "APIキー確認中";
                 let apiKey = await loadApiKeyFromVault();
                 if (!apiKey) {
@@ -1253,7 +1272,7 @@
             }
         }
 
-        // --- 画面（ペットステージ）タップ時の動作 ---
+        // --- 画面タップ動作 ---
         function handleStageClick() {
             if (isSpeaking) {
                 dbgLog("[タップ無視] ペットが発話中のためタップを受け付けません");
