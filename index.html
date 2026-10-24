@@ -416,6 +416,7 @@
             return diffCount / (newPixels.length / 4);
         }
 
+        // 環境の自動観察（独り言）処理 - こちらは保存対象として維持
         async function analyzeEnvironment() {
             if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
@@ -442,7 +443,6 @@
 
             isApiProcessing = true;
 
-            // モデル名を gemini-3.8-flash に更新
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const presentPersonsArray = Array.from(currentPresentPersons);
@@ -523,6 +523,7 @@
                             chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
                         }
 
+                        // 環境の自動観察はライフログとして意味があるためVaultへ記録
                         await saveEpisodeToVault(
                             "環境の自動観察",
                             `カメラで周囲の様子を察知して発話した: 「${parsed.text}」`,
@@ -569,7 +570,6 @@
 
             isApiProcessing = true;
 
-            // モデル名を gemini-3.8-flash に更新
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
@@ -805,13 +805,20 @@ Default: その他通常会話`;
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
-                    const presentPersonsArray = Array.from(currentPresentPersons);
-                    await saveEpisodeToVault(
-                        "会話の記録",
-                        `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`,
-                        currentKnownLocationName,
-                        presentPersonsArray
-                    );
+                    // ★ 通信エラー応答メッセージ（「ごめんね、通信が混雑…」等）は Vault に記録しない
+                    const isErrorMessage = aiResult.text.includes("通信が混雑") || aiResult.text.includes("考えられなかった");
+
+                    if (!isErrorMessage) {
+                        const presentPersonsArray = Array.from(currentPresentPersons);
+                        await saveEpisodeToVault(
+                            "会話の記録",
+                            `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`,
+                            currentKnownLocationName,
+                            presentPersonsArray
+                        );
+                    } else {
+                        dbgLog("[ログ制御] 通信エラーメッセージのため Vault への保存をスキップしました");
+                    }
 
                     setEmotion(aiResult.emotion);
 
@@ -1106,7 +1113,6 @@ Default: その他通常会話`;
             }
         }
 
-        // 本日のエピソード＋時間帯＋場所＋多様な視点を組み合わせて話題を生成する関数
         async function generateTopicFromContext(personName, todayContext) {
             if (isApiProcessing) return { emotion: 'Happy', text: `${personName}さん、何か面白いことあった？` };
             
@@ -1116,7 +1122,6 @@ Default: その他通常会話`;
             isApiProcessing = true;
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-            // 観点1: 時間帯メタデータ（朝・昼・夕方・夜・深夜）の算出
             const hour = new Date().getHours();
             let timeOfDay = "昼";
             if (hour >= 5 && hour < 11) timeOfDay = "朝";
@@ -1126,27 +1131,27 @@ Default: その他通常会話`;
             else timeOfDay = "深夜";
 
             const systemInstruction = `あなたは可愛らしく少し気まぐれなAIペットです。
-        今日すでに一度挨拶をした相手「${personName}さん」が目の前にいます。
+今日すでに一度挨拶をした相手「${personName}さん」が目の前にいます。
 
-        【現在のシチュエーション】
-        - 現在の時間帯: ${timeOfDay} (${hour}時)
-        - 現在地: ${currentKnownLocationName}
+【現在のシチュエーション】
+- 現在の時間帯: ${timeOfDay} (${hour}時)
+- 現在地: ${currentKnownLocationName}
 
-        【本日のエピソード記録】
-        ${todayContext || "（※本日最初の再会です。過去の会話ログはありません）"}
+【本日のエピソード記録】
+${todayContext || "（※本日最初の再会です。過去の会話ログはありません）"}
 
-        【話題生成のルール】
-        1. **エピソード記録がある場合**: 過去の会話や出来事の文脈に触れて、その後の経過や感想を聞いてみてください。
-        2. **エピソード記録がない場合**: 毎回決まり文句にならないよう、以下の切り口から1つをランダムに選んで話しかけてください。
-        - 【時間帯・食事】("${timeOfDay}" に合わせたご飯や休憩の話題)
-        - 【場所の文脈】("現在地: ${currentKnownLocationName}" での過ごし方や居心地)
-        - 【気分・体調】(疲れ具合、リラックス度、気分の確認)
-        - 【ペットらしい疑問】(「何してるの？」「遊んでくれる？」など無邪気な質問)
+【話題生成のルール】
+1. **エピソード記録がある場合**: 過去の会話や出来事の文脈に触れて、その後の経過や感想を聞いてみてください。
+2. **エピソード記録がない場合**: 毎回決まり文句にならないよう、以下の切り口から1つをランダムに選んで話しかけてください。
+   - 【時間帯・食事】("${timeOfDay}" に合わせたご飯や休憩の話題)
+   - 【場所の文脈】("現在地: ${currentKnownLocationName}" での過ごし方や居心地)
+   - 【気分・体調】(疲れ具合、リラックス度、気分の確認)
+   - 【ペットらしい疑問】(「何してるの？」「遊んでくれる？」など無邪気な質問)
 
-        【共通条件】
-        - 40文字以内の話し言葉で短く自然に話しかけてください。
-        - 以下のJSONフォーマットのみで回答してください:
-        {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
+【共通条件】
+- 40文字以内の話し言葉で短く自然に話しかけてください。
+- 以下のJSONフォーマットのみで回答してください:
+{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
 
             const payload = {
                 contents: [{ role: "user", parts: [{ text: systemInstruction }] }]
@@ -1172,7 +1177,6 @@ Default: その他通常会話`;
 
                 if (jsonMatch) {
                     const parsed = JSON.parse(jsonMatch[0]);
-                    // ★ パース成功時はここで即座に生成結果を返却！
                     return {
                         emotion: parsed.emotion || 'Happy',
                         text: parsed.text || `${personName}さん、調子はどう？`
@@ -1184,7 +1188,6 @@ Default: その他通常会話`;
                 isApiProcessing = false;
             }
 
-            // ★ 万が一の通信失敗時もバリエーションを持たせるためのフォールバック
             const fallbackTopics = [
                 `${personName}さん、何か面白いことあった？`,
                 `${personName}さん、調子はどう？`,
@@ -1701,12 +1704,8 @@ Default: その他通常会話`;
                             chatLog.innerHTML += `<br><strong>ペット:</strong> ${topicResult.text}`;
                         }
 
-                        await saveEpisodeToVault(
-                            "再会時の話題",
-                            `顔認証で再会した ${bestMatchName} さんに話しかけた: 「${topicResult.text}」`,
-                            currentKnownLocationName,
-                            [bestMatchName]
-                        );
+                        // ★ ログ抑制: 一方的な話しかけである「再会時の話題」は Vault に保存しない
+                        dbgLog("[ログ制御] 再会時の話題発話のため Vault 保存をスキップします");
 
                         speak(topicResult.text, () => {
                             setEmotion('Default');
