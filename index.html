@@ -6,7 +6,7 @@
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
     <link rel="manifest" href="manifest.json">
-    <script src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
+    <script src="[https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js](https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js)"></script>
     <style>
         body {
             margin: 0;
@@ -215,7 +215,7 @@
             </div>
 
             <div id="statusBadge" class="status-badge">未起動</div>
-            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg viewBox="0 0 600 600" fill="none" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)">
                 <rect width="600" height="600" fill="none"/>
                 <g id="faceGroup" class="anim-gaze" style="transform-origin: 300px 300px;">
                     <g id="leftEyeGroup" class="anim-emotion" style="transform-origin: 175px 237px;">
@@ -444,7 +444,7 @@
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+            const endpoint = `[https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$){apiKey}`;
             const parts = [{ text: systemInstruction }];
 
             if (imageBase64) {
@@ -478,7 +478,11 @@
                 }
 
                 const data = await response.json();
-                return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                
+                // Geminiが ```json 形式のマークダウンで返した場合の自動除去処理
+                return rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+
             } catch (err) {
                 clearTimeout(timeoutId);
                 throw err;
@@ -725,7 +729,7 @@ Default: その他通常会話`;
             pendingFaceDescriptor = null;
             pendingLocationCoords = null;
             hasUserRespondedInTurn = false;
-            hasRetriedSilence = false; // 状態リセット時にのみクリア
+            hasRetriedSilence = false;
             if (safetyTimeout) {
                 clearTimeout(safetyTimeout);
                 safetyTimeout = null;
@@ -767,7 +771,7 @@ Default: その他通常会話`;
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
                 hasUserRespondedInTurn = true; 
-                hasRetriedSilence = false; // 発話検知によりリトライフラグを初期化
+                hasRetriedSilence = false;
 
                 const rawTranscript = event.results[0][0].transcript.trim();
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
@@ -928,7 +932,7 @@ Default: その他通常会話`;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
 
-                // 無音検知によるリトライは同一ターン内で一度のみ実行
+                // 無音検知時の確実なリトライ制御およびループストッパー
                 if (isConversing && !hasUserRespondedInTurn && !hasRetriedSilence && !isSleeping) {
                     hasRetriedSilence = true;
                     dbgLog("[音声認識] 発話未検知による無音終了。1秒後に1回だけ自動リトライします...");
@@ -937,8 +941,8 @@ Default: その他通常会話`;
                             startListening();
                         }
                     }, 1000);
-                } else if (isConversing && !hasUserRespondedInTurn && hasRetriedSilence) {
-                    dbgLog("[音声認識] 無音リトライの上限に達したため、待機モードへ移行します");
+                } else {
+                    dbgLog("[音声認識] 会話をクリアして通常待機モードへ戻ります");
                     resetInteractionState(5000);
                 }
             };
@@ -953,7 +957,6 @@ Default: その他通常会話`;
 
             try {
                 isConversing = true;
-                // 注意: hasRetriedSilence のリセットは startListening ではなく会話開始・成功時（resetInteractionState / onresult）に限定
 
                 if (recognitionInstance) {
                     try { 
@@ -1636,10 +1639,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     isSpeaking = false;
                     stopLipSync();
 
-                    if (!isSleeping && isQuestionText(text)) {
+                    if (!isSleeping && isQuestionText(text) && !isListening) {
                         dbgLog("[質問検知] 疑問形の発話が完了したため、1200ms後に自動で音声入力を開始します");
                         setTimeout(() => {
-                            startListening();
+                            if (!isListening && !isSpeaking) startListening();
                         }, 1200);
                     } else if (callback) {
                         callback();
@@ -1689,7 +1692,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             try {
                 dbgLog("[顔認識] 顔検出を試行中...");
-                // 誤認識防止のため scoreThreshold を 0.5 に厳格化
                 const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
                 const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
@@ -1713,7 +1715,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                 if (knownFaces.length > 0) {
                     const labeledDescriptors = knownFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [f.descriptor]));
-                    // FaceMatcher の判定距離も 0.55 に厳格化して誤判定を防止
                     const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.55);
                     const bestMatch = faceMatcher.findBestMatch(currentDescriptor);
 
