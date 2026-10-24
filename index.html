@@ -5,10 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
-    <!-- PWA用マニフェストファイルのリンク -->
     <link rel="manifest" href="manifest.json">
-    <!-- face-api.js CDN (unpkg) -->
-    <script src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
+    <script src="[https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js](https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js)"></script>
     <style>
         body {
             margin: 0;
@@ -67,7 +65,6 @@
             letter-spacing: 0.5px;
         }
 
-        /* ACTIVATE オーバーレイ画面 */
         .activate-overlay {
             position: absolute;
             top: 0;
@@ -155,7 +152,6 @@
             margin-top: 6px;
         }
 
-        /* パネルエリア */
         .control-panel {
             display: none;
             width: 320px;
@@ -164,7 +160,6 @@
             box-sizing: border-box;
         }
 
-        /* 簡易デバッグ用コンソール */
         .debug-console {
             width: 320px;
             height: 160px;
@@ -212,17 +207,15 @@
 
     <video id="cameraStream" autoplay playsinline muted></video>
 
-    <!-- メインステージ -->
     <div class="main-container">
         <div class="pet-stage" id="petStage" onclick="handleStageClick()">
-            <!-- 初回起動時オーバーレイ -->
             <div id="activateOverlay" class="activate-overlay" onclick="event.stopPropagation()">
                 <button class="activate-btn" onclick="triggerActivation()">Vaultフォルダを選択して起動</button>
                 <div class="activate-hint">タップしてAndroidのファイル選択画面からObsidianのVaultフォルダを指定してください。</div>
             </div>
 
             <div id="statusBadge" class="status-badge">未起動</div>
-            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg viewBox="0 0 600 600" fill="none" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)">
                 <rect width="600" height="600" fill="none"/>
                 <g id="faceGroup" class="anim-gaze" style="transform-origin: 300px 300px;">
                     <g id="leftEyeGroup" class="anim-emotion" style="transform-origin: 175px 237px;">
@@ -242,7 +235,6 @@
         </div>
     </div>
 
-    <!-- コントロールパネル -->
     <div id="controlPanel" class="control-panel">
         <div>
             <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">Gemini API キー:</label>
@@ -260,7 +252,6 @@
         </div>
     </div>
 
-    <!-- 画面右下のインジケータ -->
     <div id="statusIndicators" class="status-indicators">
         <span id="indSquare" style="color: #00b894;">■</span>
         <span id="indCircle" style="color: #00b894;">●</span>
@@ -309,7 +300,6 @@
             return savedKey;
         }
 
-        // --- Settings/API_KEY.md へのAPIキー自動保存 ---
         async function saveApiKeyToVault(key) {
             if (!vaultDirHandle || !key) return;
             try {
@@ -330,7 +320,6 @@
             }
         }
 
-        // --- Settings/API_KEY.md からの自動読み込み ---
         async function loadApiKeyFromVault() {
             if (!vaultDirHandle) return null;
             try {
@@ -352,7 +341,7 @@
             return null;
         }
 
-        // --- Gemini API 呼び出し（感情判別付き・最新モデル適用版） ---
+        // --- Gemini API 呼び出し（JSON解析・抽出の強化版） ---
         async function callGeminiAPI(userPrompt) {
             const apiKey = loadApiKey();
             if (!apiKey) {
@@ -360,23 +349,19 @@
                 return { emotion: 'Sad', text: "APIキーが設定されていないみたい。" };
             }
 
-            // 最新モデル (gemini-3.8-flash) に更新
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+            const endpoint = `[https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$){apiKey}`;
 
-            const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSONフォーマットのみを出力してください。他のテキストやマークダウン表記（\`\`\`json など）は一切含めないでください。
+            const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
 
-        フォーマット:
-        {
-        "emotion": "Happy" | "Anger" | "Surprised" | "Sad" | "Default",
-        "text": "40文字以内の明るく親しみやすい返答"
-        }
+フォーマット:
+{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}
 
-        感情の基準:
-        - Happy: 嬉しい、楽しい、褒められた、親しい挨拶
-        - Anger: 怒られた、意地悪された、嫌なことを言われた
-        - Surprised: 驚いた、ビックリするニュース、珍しいこと
-        - Sad: 悲しい話、バイバイのお別れ、寂しいとき
-        - Default: 通常の日常会話や質問回答`;
+感情基準:
+Happy: 嬉しい、挨拶、褒められた
+Anger: 怒られた、いじわる
+Surprised: 驚き、びっくり
+Sad: 悲しい、バイバイ
+Default: その他通常会話`;
 
             const payload = {
                 contents: [
@@ -403,18 +388,24 @@
                 }
 
                 const data = await response.json();
-                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-                
-                // マークダウンのクリーンアップ
-                rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                dbgLog(`[Gemini 受信テキスト] ${rawText}`);
 
-                dbgLog(`[Gemini 生レスポンス] ${rawText}`);
-
-                const parsed = JSON.parse(rawText);
-                return {
-                    emotion: parsed.emotion || 'Happy',
-                    text: parsed.text || "うまく返事できなかったよ。"
-                };
+                // JSONブロック（{...}）部分を正規表現で厳密に抽出
+                const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    const validEmotions = ['Happy', 'Anger', 'Surprised', 'Sad', 'Default'];
+                    const emotion = validEmotions.includes(parsed.emotion) ? parsed.emotion : 'Happy';
+                    const text = parsed.text || "うん！分かったよ！";
+                    
+                    dbgLog(`[Gemini 解析成功] 感情:${emotion}, テキスト:"${text}"`);
+                    return { emotion, text };
+                } else {
+                    // JSON形式で返ってこなかった場合のフォールバック
+                    dbgLog("[Gemini 警告] JSON構造が見つかりません。直接テキストとして処理します", true);
+                    return { emotion: 'Happy', text: rawText.substring(0, 40) };
+                }
 
             } catch (err) {
                 dbgLog(`[Gemini APIエラー/解析例外] ${err.message}`, true);
@@ -424,6 +415,7 @@
                 };
             }
         }
+
         function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
             isWaitingForLocationName = false;
@@ -553,7 +545,7 @@
                     return;
                 }
 
-                // ★ Gemini 応答生成と表情切り替え
+                // ★ Gemini 応答生成・表情制御・音声出力の完全連携部
                 if (IS_AI_MODE) {
                     const aiResult = await callGeminiAPI(rawTranscript);
                     
@@ -561,9 +553,10 @@
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
-                    // 取得した感情（Anger / Surprised / Happy / Sad / Default）を顔に反映
+                    // 1. 返答に合わせた表情を反映（Anger, Surprised, Happy, Sad, Default）
                     setEmotion(aiResult.emotion);
 
+                    // 2. 音声合成で喋らせる（リップシンク連動）
                     speak(aiResult.text, () => {
                         resetInteractionState(8000);
                     });
@@ -718,7 +711,6 @@
             }
         }
 
-        // --- 瞬き（まばたき）処理 ---
         function triggerBlink() {
             if (isSleeping) return;
 
@@ -740,7 +732,6 @@
             blinkTimer = setTimeout(triggerBlink, nextBlink);
         }
 
-        // --- きょろきょろ（視線移動）処理 ---
         function triggerGazeShift() {
             const faceGroup = document.getElementById('faceGroup');
 
@@ -958,7 +949,6 @@
             currentKnownLocationName = locationName;
         }
 
-        // --- アクティベーション ---
         async function triggerActivation() {
             if (isActivated) return;
 
@@ -1030,7 +1020,7 @@
                     throw new Error("faceapiまたはnetsが未ロードです");
                 }
 
-                const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
+                const MODEL_URL = '[https://unpkg.com/@vladmandic/face-api@1.7.15/model/](https://unpkg.com/@vladmandic/face-api@1.7.15/model/)';
                 dbgLog(`モデルをロード開始: ${MODEL_URL}`);
                 
                 if (faceapi.nets.tinyFaceDetector) {
@@ -1272,7 +1262,6 @@
             }
         }
 
-        // --- 画面タップ動作 ---
         function handleStageClick() {
             if (isSpeaking) {
                 dbgLog("[タップ無視] ペットが発話中のためタップを受け付けません");
