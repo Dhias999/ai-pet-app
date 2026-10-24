@@ -447,7 +447,6 @@
 
             isApiProcessing = true;
 
-            // モデル名を適正な gemini-2.5-flash に更新
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
             const presentPersonsArray = Array.from(currentPresentPersons);
@@ -574,7 +573,6 @@
 
             isApiProcessing = true;
 
-            // モデル名を適正な gemini-2.5-flash に更新
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
             const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
@@ -810,7 +808,6 @@ Default: その他通常会話`;
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
-                    // ObsidianのEpisodesフォルダへ会話を即時記録
                     const presentPersonsArray = Array.from(currentPresentPersons);
                     await saveEpisodeToVault(
                         "会話の記録",
@@ -1028,6 +1025,169 @@ Default: その他通常会話`;
             dbgLog("待機アニメーション（まばたき・視線移動）開始");
         }
 
+        // Obsidian の Episodes/YYYY-MM-DD.md への日別まとめ・追記保存ロジック
+        async function saveEpisodeToVault(episodeTitle, contentText, locationName, personNames = []) {
+            if (!vaultDirHandle) return;
+
+            const now = new Date();
+            const dateStr = now.toISOString().split('T')[0];
+            const timeStr = now.toTimeString().split(' ')[0];
+            const filename = `${dateStr}.md`;
+
+            let episodeBlock = `\n---\n\n`;
+            episodeBlock += `### [${timeStr}] ${episodeTitle}\n`;
+            
+            if (locationName) {
+                episodeBlock += `**場所**: [[${locationName}]]  \n`;
+            }
+
+            if (personNames && personNames.length > 0) {
+                const personLinks = personNames.map(name => `[[${name}]]`).join(', ');
+                episodeBlock += `**一緒にいた人**: ${personLinks}  \n`;
+            }
+            
+            episodeBlock += `\n${contentText}\n`;
+
+            try {
+                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: true });
+                let fileHandle = null;
+                let isNewFile = false;
+                
+                try {
+                    fileHandle = await dirHandle.getFileHandle(filename, { create: false });
+                } catch (e) {
+                    fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+                    isNewFile = true;
+                }
+
+                let fullContent = "";
+                if (isNewFile) {
+                    fullContent = `# ${dateStr} の記録\n` + episodeBlock;
+                } else {
+                    const file = await fileHandle.getFile();
+                    const existingText = await file.text();
+                    fullContent = existingText + episodeBlock;
+                }
+
+                const writable = await fileHandle.createWritable();
+                await writable.write(fullContent);
+                await writable.close();
+                
+                dbgLog(`[エピソード保存] Episodes/${filename} へ追記完了`);
+            } catch (err) {
+                dbgLog(`[エピソード保存エラー] ${err.message}`, true);
+            }
+        }
+
+        // 本日挨拶済みか Vault から判定
+        async function hasGreetedTodayFromVault(personName) {
+            if (!vaultDirHandle) return false;
+            const dateStr = new Date().toISOString().split('T')[0];
+            const filename = `${dateStr}.md`;
+
+            try {
+                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
+                const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
+                const file = await fileHandle.getFile();
+                const text = await file.text();
+                return text.includes(`${personName}さん、こんにちは`);
+            } catch (err) {
+                return false;
+            }
+        }
+
+        // 本日のエピソード文脈を取得
+        async function getTodayEpisodeText() {
+            if (!vaultDirHandle) return "";
+            const dateStr = new Date().toISOString().split('T')[0];
+            const filename = `${dateStr}.md`;
+
+            try {
+                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
+                const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
+                const file = await fileHandle.getFile();
+                return await file.text();
+            } catch (err) {
+                return "";
+            }
+        }
+
+        // 本日のエピソードをもとに話題を生成
+        async function generateTopicFromContext(personName, todayContext) {
+            if (isApiProcessing) return { emotion: 'Happy', text: `${personName}さん、何か面白いことあった？` };
+            
+            const apiKey = loadApiKey();
+            if (!apiKey) return { emotion: 'Happy', text: `${personName}さん、また会えたね！` };
+
+            isApiProcessing = true;
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+            const systemInstruction = `あなたは可愛らしいAIペットです。すでに今日一度挨拶をした相手「${personName}さん」が目の前にいます。
+これまでの本日のエピソード（会話ログや出来事）を参考にして、${personName}さんに親しみを込めて話しかける話題や質問を1つ考えてください。
+
+【本日のエピソード記録】
+${todayContext || "（まだ目立った記録はありません）"}
+
+【条件】
+- 過去の会話や出来事に少し触れつつ、自然に話しかけてください。
+- 40文字以内の話し言葉で短く話しかけてください。
+- 以下のJSONフォーマットのみで回答してください:
+{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
+
+            const payload = {
+                contents: [{ role: "user", parts: [{ text: systemInstruction }] }]
+            };
+
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
+
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    return {
+                        emotion: parsed.emotion || 'Happy',
+                        text: parsed.text || `${personName}さん、また会えたね！`
+                    };
+                }
+            } catch (err) {
+                dbgLog(`[話題生成エラー] ${err.message}`, true);
+            } finally {
+                isApiProcessing = false;
+            }
+
+            return { emotion: 'Happy', text: `${personName}さん、調子はどう？` };
+        }
+
+        async function savePersonToVault(personName, descriptor) {
+            const filename = `${personName}.md`;
+            const descriptorArray = Array.from(descriptor);
+            
+            const jsonStr = JSON.stringify({ descriptor: descriptorArray });
+            const content = `# 人物: ${personName}\n**登録日時**: ${new Date().toLocaleString()}\n\n\`\`\`json\n${jsonStr}\n\`\`\`\n`;
+
+            await writeMarkdownFile("Persons", filename, content, false);
+
+            knownFaces.push({
+                name: personName,
+                descriptor: descriptor
+            });
+            dbgLog(`[人物登録完了] Persons/${filename} を作成しました`);
+        }
+
         async function writeMarkdownFile(subDir, fileName, content, append = false) {
             if (!vaultDirHandle) return;
             try {
@@ -1047,45 +1207,6 @@ Default: その他通常会話`;
             } catch (err) {
                 dbgLog(`[保存失敗] ${err.message}`, true);
             }
-        }
-
-        async function saveEpisodeToVault(episodeTitle, contentText, locationName, personNames = []) {
-            const dateStr = new Date().toISOString().split('T')[0];
-            const timeStr = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
-            const filename = `${dateStr}_${timeStr}_${episodeTitle}.md`;
-
-            let content = `# エピソード: ${episodeTitle}\n`;
-            content += `**日時**: ${new Date().toLocaleString()}\n`;
-            
-            if (locationName) {
-                content += `**場所**: [[${locationName}]]\n`;
-            }
-
-            if (personNames && personNames.length > 0) {
-                const personLinks = personNames.map(name => `[[${name}]]`).join(', ');
-                content += `**一緒にいた人**: ${personLinks}\n`;
-            }
-            
-            content += `\n## 内容\n${contentText}\n`;
-
-            await writeMarkdownFile("Episodes", filename, content, false);
-            dbgLog(`[エピソード保存] Episodes/${filename} を作成`);
-        }
-
-        async function savePersonToVault(personName, descriptor) {
-            const filename = `${personName}.md`;
-            const descriptorArray = Array.from(descriptor);
-            
-            const jsonStr = JSON.stringify({ descriptor: descriptorArray });
-            const content = `# 人物: ${personName}\n**登録日時**: ${new Date().toLocaleString()}\n\n\`\`\`json\n${jsonStr}\n\`\`\`\n`;
-
-            await writeMarkdownFile("Persons", filename, content, false);
-
-            knownFaces.push({
-                name: personName,
-                descriptor: descriptor
-            });
-            dbgLog(`[人物登録完了] Persons/${filename} を作成しました`);
         }
 
         async function loadKnownFacesFromVault() {
@@ -1409,6 +1530,14 @@ Default: その他通常会話`;
             if (mouth) mouth.setAttribute('d', preset.mouthD);
         }
 
+        // テキストが疑問形・質問文かを判定する関数
+        function isQuestionText(text) {
+            if (!text) return false;
+            const questionRegex = /[？?]|(かな|ですか|どう|教えて|なの|かい|うか|何|だれ|どこ|いつ|なぜ|どうして)[。！!]?$/;
+            return questionRegex.test(text.trim());
+        }
+
+        // 発話処理（質問時は 600ms 後に自動で音声入力へ）
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
 
@@ -1431,7 +1560,16 @@ Default: その他通常会話`;
                     if (speechSafetyTimer) clearTimeout(speechSafetyTimer);
                     isSpeaking = false;
                     stopLipSync();
-                    if (callback) callback();
+
+                    // 発話内容が質問・疑問形だった場合は自動で音声聞き取りを開始
+                    if (!isSleeping && isQuestionText(text)) {
+                        dbgLog("[質問検知] 疑問形の発話が完了したため、600ms後に自動で音声入力を開始します");
+                        setTimeout(() => {
+                            startListening();
+                        }, 600); // 誤認識を防ぐために600msのウェイトを設定
+                    } else if (callback) {
+                        callback();
+                    }
                 };
 
                 utterance.onstart = () => { 
@@ -1502,17 +1640,52 @@ Default: その他通常会話`;
                 }
 
                 if (bestMatchName) {
-                    if (!currentPresentPersons.has(bestMatchName)) {
-                        currentPresentPersons.add(bestMatchName);
-                        dbgLog(`[顔認識成功] ${bestMatchName} さんを認識しました`);
+                    currentPresentPersons.add(bestMatchName);
+                    
+                    // 本日すでに挨拶済みか Episodes/YYYY-MM-DD.md から確認
+                    const alreadyGreeted = await hasGreetedTodayFromVault(bestMatchName);
+
+                    if (!alreadyGreeted) {
+                        dbgLog(`[顔認識成功] 本日初回の ${bestMatchName} さんを認識しました`);
                         setEmotion('Happy');
                         
-                        speak(`${bestMatchName}さん、こんにちは！`, () => {
+                        const greetingText = `${bestMatchName}さん、こんにちは！`;
+
+                        await saveEpisodeToVault(
+                            "あいさつ",
+                            `顔認証で ${bestMatchName} さんを認識し、あいさつをした: 「${greetingText}」`,
+                            currentKnownLocationName,
+                            [bestMatchName]
+                        );
+
+                        speak(greetingText, () => {
                             setEmotion('Default');
                             scheduleNextVisionCheck(10000);
                         });
                     } else {
-                        scheduleNextVisionCheck(8000);
+                        dbgLog(`[顔認識] ${bestMatchName} さんは本日あいさつ済みのため、本日のエピソードから話題を生成します`);
+                        
+                        const todayContext = await getTodayEpisodeText();
+                        const topicResult = await generateTopicFromContext(bestMatchName, todayContext);
+                        
+                        setEmotion(topicResult.emotion);
+                        
+                        const chatLog = document.getElementById('chatLog');
+                        if (chatLog) {
+                            chatLog.innerHTML += `<br><strong>ペット:</strong> ${topicResult.text}`;
+                        }
+
+                        await saveEpisodeToVault(
+                            "再会時の話題",
+                            `顔認証で再会した ${bestMatchName} さんに話しかけた: 「${topicResult.text}」`,
+                            currentKnownLocationName,
+                            [bestMatchName]
+                        );
+
+                        speak(topicResult.text, () => {
+                            setEmotion('Default');
+                            scheduleNextVisionCheck(20000);
+                        });
                     }
                 } else {
                     isConversing = true;
@@ -1551,7 +1724,6 @@ Default: その他通常会話`;
                 isSleeping = false;
                 setEmotion('Default');
 
-                // スリープ解除に伴いカメラ再生とタイマーを再スタート
                 const videoEl = document.getElementById('cameraStream');
                 if (videoEl && videoEl.srcObject) {
                     videoEl.play().catch(e => dbgLog(`[カメラ復帰再生エラー] ${e.message}`, true));
