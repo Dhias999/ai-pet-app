@@ -271,7 +271,6 @@
             dbgLog(`${e.message} (${e.filename}:${e.lineno})`, true);
         });
 
-        const IS_TEST_MODE = false; 
         let IS_AI_MODE = true;
 
         let vaultDirHandle = null; 
@@ -294,14 +293,14 @@
         let envCheckTimer = null;
         let isSpeaking = false;
 
-        // ★ API排他ロック＆レート制限バックオフ制御用変数
+        // API排他ロック＆レート制限バックオフ制御用変数
         let isApiProcessing = false;
         let envCheckBackoffDelay = 60000; // 初期値 60秒
         let wakeLockObj = null;
 
         let lastFrameImageData = null;
 
-        // ★ 改善策1: Screen Wake Lock (画面常時点灯・スリープ防止)
+        // Screen Wake Lock (画面常時点灯・スリープ防止)
         async function requestWakeLock() {
             try {
                 if ('wakeLock' in navigator) {
@@ -317,10 +316,24 @@
             }
         }
 
-        // 画面フォーカス復帰時にWakeLockを再取得
+        // 画面フォーカス復帰時にWakeLockとカメラ再生を再取得
         document.addEventListener('visibilitychange', async () => {
-            if (wakeLockObj !== null && document.visibilityState === 'visible') {
-                await requestWakeLock();
+            if (document.visibilityState === 'visible') {
+                dbgLog("[SYSTEM] 画面復帰を検知。WakeLockとカメラ状態を再点検します");
+                
+                if (wakeLockObj !== null) {
+                    await requestWakeLock();
+                }
+
+                const videoEl = document.getElementById('cameraStream');
+                if (videoEl && videoEl.srcObject) {
+                    try {
+                        await videoEl.play();
+                        dbgLog("[カメラ] フォーカス復帰に伴いビデオ再生を再開しました");
+                    } catch (err) {
+                        dbgLog(`[カメラ復旧エラー] ${err.message}`, true);
+                    }
+                }
             }
         });
 
@@ -372,7 +385,7 @@
             return null;
         }
 
-        // ★ 改善策2: 送信画像の超軽量化 (320x240 / 画質0.4)
+        // 送信画像の超軽量化 (320x240 / 画質0.4)
         function captureCameraFrame() {
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
@@ -385,7 +398,6 @@
             ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
             
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            // 画質を 0.4 に圧縮してファイルサイズを劇的に短縮
             const dataUrl = canvas.toDataURL('image/jpeg', 0.4);
             return {
                 base64: dataUrl.split(',')[1] || null,
@@ -408,7 +420,7 @@
             return diffCount / (newPixels.length / 4);
         }
 
-        // ★ 改善策3: API排他ロック ＆ 指数バックオフ付き環境判定
+        // API排他ロック ＆ 指数バックオフ付き環境判定
         async function analyzeEnvironment() {
             if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
@@ -433,10 +445,10 @@
             const apiKey = loadApiKey();
             if (!apiKey) return;
 
-            // API通信排他ロック獲得
             isApiProcessing = true;
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+            // モデル名を適正な gemini-2.5-flash に更新
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
             const presentPersonsArray = Array.from(currentPresentPersons);
             const personContext = presentPersonsArray.length > 0 
@@ -491,17 +503,15 @@
 
                 clearTimeout(timeoutId);
 
-                // ★ 429 レート制限時の指数バックオフ対応
                 if (response.status === 429) {
                     dbgLog(`[環境分析] レート制限(429)発生。次回待機時間を ${envCheckBackoffDelay / 1000}秒 に延長します`, true);
                     scheduleNextEnvCheck(envCheckBackoffDelay);
-                    envCheckBackoffDelay = Math.min(envCheckBackoffDelay * 2, 300000); // 最大5分(300秒)まで倍増
+                    envCheckBackoffDelay = Math.min(envCheckBackoffDelay * 2, 300000);
                     return;
                 }
 
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-                // 正常通信成功時はバックオフ間隔を初期値(60秒)にリセット
                 envCheckBackoffDelay = 60000;
 
                 const data = await response.json();
@@ -539,7 +549,6 @@
                 const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                 dbgLog(`[環境分析エラー] ${errorReason}`, true);
             } finally {
-                // 通信完了後に排他ロック解除
                 isApiProcessing = false;
             }
 
@@ -565,7 +574,8 @@
 
             isApiProcessing = true;
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+            // モデル名を適正な gemini-2.5-flash に更新
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
             const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
 
@@ -800,6 +810,15 @@ Default: その他通常会話`;
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
+                    // ObsidianのEpisodesフォルダへ会話を即時記録
+                    const presentPersonsArray = Array.from(currentPresentPersons);
+                    await saveEpisodeToVault(
+                        "会話の記録",
+                        `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`,
+                        currentKnownLocationName,
+                        presentPersonsArray
+                    );
+
                     setEmotion(aiResult.emotion);
 
                     speak(aiResult.text, () => {
@@ -892,13 +911,11 @@ Default: その他通常会話`;
 
         let currentEmotion = 'Default';
         let isActivated = false;
-        let inactivityTimer = null;
         let visionTimer = null;         
         let lipSyncInterval = null;     
         let isConversing = false;
         let isSleeping = false;         
         let isListening = false;        
-        let isCollectingImages = false; 
 
         window.addEventListener('DOMContentLoaded', () => {
             setEmotion('Default');
@@ -1214,7 +1231,6 @@ Default: その他通常会話`;
                 isActivated = true;
                 dbgLog("フォルダの権限取得成功");
 
-                // 起動時にScreen Wake Lock（画面常時点灯）を発行
                 await requestWakeLock();
 
                 const overlay = document.getElementById('activateOverlay');
@@ -1336,14 +1352,11 @@ Default: その他通常会話`;
 
         function updateIndicators() {
             const indSquare = document.getElementById('indSquare');
-            const indCircle = document.getElementById('indCircle');
+            if (!indSquare) return;
 
             if (isSleeping) indSquare.style.color = '#0984e3'; 
             else if (isListening) indSquare.style.color = '#d63031'; 
             else indSquare.style.color = '#00b894'; 
-
-            if (isCollectingImages) indCircle.style.color = '#d63031'; 
-            else indCircle.style.color = '#00b894'; 
         }
 
         function setEmotion(emotionName) {
@@ -1537,8 +1550,17 @@ Default: その他通常会話`;
             if (isSleeping) {
                 isSleeping = false;
                 setEmotion('Default');
+
+                // スリープ解除に伴いカメラ再生とタイマーを再スタート
+                const videoEl = document.getElementById('cameraStream');
+                if (videoEl && videoEl.srcObject) {
+                    videoEl.play().catch(e => dbgLog(`[カメラ復帰再生エラー] ${e.message}`, true));
+                }
+
                 speak("おはよう！起きたよ。", () => {
                     startIdleAnimations();
+                    scheduleNextVisionCheck(2000);
+                    scheduleNextEnvCheck(5000);
                 });
                 return;
             }
