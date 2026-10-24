@@ -725,7 +725,7 @@ Default: その他通常会話`;
             pendingFaceDescriptor = null;
             pendingLocationCoords = null;
             hasUserRespondedInTurn = false;
-            hasRetriedSilence = false;
+            hasRetriedSilence = false; // 状態リセット時にのみクリア
             if (safetyTimeout) {
                 clearTimeout(safetyTimeout);
                 safetyTimeout = null;
@@ -767,6 +767,7 @@ Default: その他通常会話`;
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
                 hasUserRespondedInTurn = true; 
+                hasRetriedSilence = false; // 発話検知によりリトライフラグを初期化
 
                 const rawTranscript = event.results[0][0].transcript.trim();
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
@@ -811,7 +812,7 @@ Default: その他通常会話`;
                     const denyKeywords = ['違う', 'ううん', 'いや', 'いいえ', 'やめる', 'キャンセル', 'ちがう'];
                     const isDenied = denyKeywords.some(keyword => transcriptClean.includes(keyword));
 
-                    if (isDenied) {
+                    if (isDenied || !transcriptClean) {
                         speak("そっか、人違いだったんだね。ごめんね！", () => {
                             resetInteractionState(15000);
                         });
@@ -863,7 +864,6 @@ Default: その他通常会話`;
                 }
 
                 if (IS_AI_MODE) {
-                    // 会話中も存在人物のタイムスタンプを更新し、勝手に離脱扱いになるのを防ぐ
                     const nowTime = Date.now();
                     knownFaces.forEach(f => {
                         if (isExactWordMatch(rawTranscript, f.name)) {
@@ -873,7 +873,6 @@ Default: その他通常会話`;
                         }
                     });
 
-                    // 現在滞在中の全人物のタイムスタンプを更新（会話中の保護）
                     currentPresentPersons.forEach(pName => {
                         personSeenTimestamps.set(pName, nowTime);
                     });
@@ -929,14 +928,18 @@ Default: その他通常会話`;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
 
+                // 無音検知によるリトライは同一ターン内で一度のみ実行
                 if (isConversing && !hasUserRespondedInTurn && !hasRetriedSilence && !isSleeping) {
                     hasRetriedSilence = true;
-                    dbgLog("[音声認識] 発話未検知による無音終了。1秒後に聞き取りを1度だけ自動再試行します...");
+                    dbgLog("[音声認識] 発話未検知による無音終了。1秒後に1回だけ自動リトライします...");
                     setTimeout(() => {
                         if (isConversing && !isListening && !isSpeaking) {
                             startListening();
                         }
                     }, 1000);
+                } else if (isConversing && !hasUserRespondedInTurn && hasRetriedSilence) {
+                    dbgLog("[音声認識] 無音リトライの上限に達したため、待機モードへ移行します");
+                    resetInteractionState(5000);
                 }
             };
 
@@ -950,9 +953,7 @@ Default: その他通常会話`;
 
             try {
                 isConversing = true;
-                // 新しいターン開始時にフラグを必ずリセット
-                hasUserRespondedInTurn = false;
-                hasRetriedSilence = false;
+                // 注意: hasRetriedSilence のリセットは startListening ではなく会話開始・成功時（resetInteractionState / onresult）に限定
 
                 if (recognitionInstance) {
                     try { 
@@ -1153,7 +1154,6 @@ Default: その他通常会話`;
             
             episodeBlock += `\n${contentText}\n`;
 
-            // リファクタリング: writeMarkdownFile を使って追記処理を一約
             await writeMarkdownFile("Episodes", filename, episodeBlock, true);
         }
 
@@ -1689,7 +1689,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             try {
                 dbgLog("[顔認識] 顔検出を試行中...");
-                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
+                // 誤認識防止のため scoreThreshold を 0.5 に厳格化
+                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
                 const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
                 const now = Date.now();
@@ -1712,7 +1713,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                 if (knownFaces.length > 0) {
                     const labeledDescriptors = knownFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [f.descriptor]));
-                    const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6);
+                    // FaceMatcher の判定距離も 0.55 に厳格化して誤判定を防止
+                    const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.55);
                     const bestMatch = faceMatcher.findBestMatch(currentDescriptor);
 
                     if (bestMatch && bestMatch.label !== 'unknown') {
