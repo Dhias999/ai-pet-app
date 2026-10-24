@@ -6,7 +6,7 @@
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
     <link rel="manifest" href="manifest.json">
-    <script src="[https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js](https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js)"></script>
+    <script src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
     <style>
         body {
             margin: 0;
@@ -215,7 +215,7 @@
             </div>
 
             <div id="statusBadge" class="status-badge">未起動</div>
-            <svg viewBox="0 0 600 600" fill="none" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)">
+            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <rect width="600" height="600" fill="none"/>
                 <g id="faceGroup" class="anim-gaze" style="transform-origin: 300px 300px;">
                     <g id="leftEyeGroup" class="anim-emotion" style="transform-origin: 175px 237px;">
@@ -341,15 +341,15 @@
             return null;
         }
 
-        // --- Gemini API 呼び出し（JSON解析・抽出の強化版） ---
-        async function callGeminiAPI(userPrompt) {
+        // --- Gemini API 呼び出し（自動リトライ・指数バックオフ機能付き） ---
+        async function callGeminiAPI(userPrompt, maxRetries = 3) {
             const apiKey = loadApiKey();
             if (!apiKey) {
                 dbgLog("[API Error] APIキーが未設定です", true);
                 return { emotion: 'Sad', text: "APIキーが設定されていないみたい。" };
             }
 
-            const endpoint = `[https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$){apiKey}`;
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
 
@@ -374,45 +374,54 @@ Default: その他通常会話`;
                 ]
             };
 
-            try {
-                dbgLog(`[Gemini リクエスト送信] "${userPrompt}"`);
-                const response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
 
-                if (!response.ok) {
-                    const errData = await response.json();
-                    throw new Error(errData.error?.message || `HTTP ${response.status}`);
+                    if (!response.ok) {
+                        const errData = await response.json().catch(() => ({}));
+                        const errMsg = errData.error?.message || `HTTP ${response.status}`;
+                        throw new Error(errMsg);
+                    }
+
+                    const data = await response.json();
+                    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                    dbgLog(`[Gemini 受信テキスト] ${rawText}`);
+
+                    // JSONブロック（{...}）部分を正規表現で抽出
+                    const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
+                    if (jsonMatch) {
+                        const parsed = JSON.parse(jsonMatch[0]);
+                        const validEmotions = ['Happy', 'Anger', 'Surprised', 'Sad', 'Default'];
+                        const emotion = validEmotions.includes(parsed.emotion) ? parsed.emotion : 'Happy';
+                        const text = parsed.text || "うん！分かったよ！";
+                        
+                        dbgLog(`[Gemini 解析成功] 感情:${emotion}, テキスト:"${text}"`);
+                        return { emotion, text };
+                    } else {
+                        dbgLog("[Gemini 警告] JSON構造が見つかりません。直接テキストとして処理します", true);
+                        return { emotion: 'Happy', text: rawText.substring(0, 40) };
+                    }
+
+                } catch (err) {
+                    dbgLog(`[Gemini 試行 ${attempt} 失敗] ${err.message}`, true);
+
+                    if (attempt === maxRetries) {
+                        return {
+                            emotion: 'Sad',
+                            text: "ごめんね、混雑していて上手くお返事が考えられなかったよ。"
+                        };
+                    }
+
+                    const delayMs = Math.pow(2, attempt - 1) * 1500;
+                    dbgLog(`[Gemini 自動リトライ] ${delayMs / 1000}秒後に再試行します...`);
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
                 }
-
-                const data = await response.json();
-                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-                dbgLog(`[Gemini 受信テキスト] ${rawText}`);
-
-                // JSONブロック（{...}）部分を正規表現で厳密に抽出
-                const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
-                if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0]);
-                    const validEmotions = ['Happy', 'Anger', 'Surprised', 'Sad', 'Default'];
-                    const emotion = validEmotions.includes(parsed.emotion) ? parsed.emotion : 'Happy';
-                    const text = parsed.text || "うん！分かったよ！";
-                    
-                    dbgLog(`[Gemini 解析成功] 感情:${emotion}, テキスト:"${text}"`);
-                    return { emotion, text };
-                } else {
-                    // JSON形式で返ってこなかった場合のフォールバック
-                    dbgLog("[Gemini 警告] JSON構造が見つかりません。直接テキストとして処理します", true);
-                    return { emotion: 'Happy', text: rawText.substring(0, 40) };
-                }
-
-            } catch (err) {
-                dbgLog(`[Gemini APIエラー/解析例外] ${err.message}`, true);
-                return {
-                    emotion: 'Default',
-                    text: "ごめんね、うまくお返事が考えられなかったよ。"
-                };
             }
         }
 
@@ -545,7 +554,6 @@ Default: その他通常会話`;
                     return;
                 }
 
-                // ★ Gemini 応答生成・表情制御・音声出力の完全連携部
                 if (IS_AI_MODE) {
                     const aiResult = await callGeminiAPI(rawTranscript);
                     
@@ -553,10 +561,8 @@ Default: その他通常会話`;
                         chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
                     }
 
-                    // 1. 返答に合わせた表情を反映（Anger, Surprised, Happy, Sad, Default）
                     setEmotion(aiResult.emotion);
 
-                    // 2. 音声合成で喋らせる（リップシンク連動）
                     speak(aiResult.text, () => {
                         resetInteractionState(8000);
                     });
@@ -1020,7 +1026,7 @@ Default: その他通常会話`;
                     throw new Error("faceapiまたはnetsが未ロードです");
                 }
 
-                const MODEL_URL = '[https://unpkg.com/@vladmandic/face-api@1.7.15/model/](https://unpkg.com/@vladmandic/face-api@1.7.15/model/)';
+                const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
                 dbgLog(`モデルをロード開始: ${MODEL_URL}`);
                 
                 if (faceapi.nets.tinyFaceDetector) {
