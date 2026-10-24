@@ -284,6 +284,7 @@
         let blinkTimer = null;
         let gazeTimer = null;
         let safetyTimeout = null;
+        let isSpeaking = false; // ★ 発話中かどうかの管理フラグ
 
         function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
@@ -391,7 +392,7 @@
                 // ★ 場所の名前を待っている状態の場合の処理
                 if (isWaitingForLocationName) {
                     isWaitingForLocationName = false;
-                    const locationName = rawTranscript.replace(/[\\/:*?"<>|]/g, '');
+                    const locationName = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
 
                     speak(`「${locationName}」だね。覚えたよ！`, async () => {
                         await saveLocationToVault(locationName, pendingLocationCoords);
@@ -1001,18 +1002,24 @@
                 utterance.pitch = 1.6; 
                 utterance.rate = 1.3;  
 
-                utterance.onstart = () => { startLipSync(); };
+                utterance.onstart = () => { 
+                    isSpeaking = true; // ★ 発話開始でタップガードを有効化
+                    startLipSync(); 
+                };
                 utterance.onend = () => {
+                    isSpeaking = false; // ★ 発話完了でタップガードを解除
                     stopLipSync();
                     if (callback) callback();
                 };
                 utterance.onerror = () => {
+                    isSpeaking = false; // ★ エラー時もガード解除
                     stopLipSync();
                     if (callback) callback();
                 };
 
                 window.speechSynthesis.speak(utterance);
             } else {
+                isSpeaking = false;
                 if (callback) callback();
             }
         }
@@ -1065,11 +1072,8 @@
                         dbgLog(`[顔認識] ${bestMatchName} さんを認識しました`);
                         setEmotion('Happy');
                         
-                        // ★ 既知の顔を検知した場合：挨拶したあとに自動で音声入力（おしゃべり待ち）へ繋げる
                         speak(`${bestMatchName}さん、こんにちは！何かお話する？`, () => {
                             setEmotion('Default');
-                            // 自動開始の制限（PWAセキュリティ）を回避するため、もし自動開始がブロックされる場合は画面タップを促すメッセージにするが、
-                            // ユーザー操作直後（挨拶中など）はセッションが通ることがあるため自動で startListening() を呼び出す
                             try {
                                 startListening();
                             } catch(e) {
@@ -1110,6 +1114,12 @@
 
         // --- 画面（ペットステージ）タップ時の動作 ---
         function handleStageClick() {
+            // ★ ペットの発話中はタップを受け付けず無視するガード
+            if (isSpeaking) {
+                dbgLog("[タップ無視] ペットが発話中のためタップを受け付けません");
+                return;
+            }
+
             if (isSleeping) {
                 isSleeping = false;
                 setEmotion('Default');
@@ -1119,19 +1129,10 @@
                 return;
             }
 
-            if (isWaitingForName) {
-                dbgLog("画面タップにより名前の音声入力を開始します");
-                speak("うん、お名前は何て言うの？", () => {
-                    startListening();
-                });
-                return;
-            }
-
-            if (isWaitingForLocationName) {
-                dbgLog("画面タップにより場所名の音声入力を開始します");
-                speak("ここはなんて名前の場所かな？", () => {
-                    startListening();
-                });
+            // 名前待ちまたは場所名待ちの時：発話完了後のタップでダイレクトに音声認識（マイク）を開始
+            if (isWaitingForName || isWaitingForLocationName) {
+                dbgLog("画面タップにより入力待受の音声認識を開始します");
+                startListening();
                 return;
             }
 
