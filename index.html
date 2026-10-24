@@ -295,15 +295,14 @@
         let isSpeaking = false;
         let lastPetSpeech = ""; 
 
+        let hasUserRespondedInTurn = false; 
+        let hasRetriedSilence = false;      
+
         let isApiProcessing = false;
         let envCheckBackoffDelay = 60000;
         let wakeLockObj = null;
 
         let lastFrameImageData = null;
-        
-        // 音声認識の自動リトライ制御フラグ
-        let hasRecognizedResult = false;
-        let silenceRetryCount = 0;
 
         async function requestWakeLock() {
             try {
@@ -347,24 +346,43 @@
             return savedKey;
         }
 
+        async function writeMarkdownFile(subDir, fileName, content, append = false) {
+            if (!vaultDirHandle) return;
+            try {
+                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
+                let fileHandle = null;
+                let existingContent = "";
+
+                if (append) {
+                    try {
+                        fileHandle = await dirHandle.getFileHandle(fileName, { create: false });
+                        const file = await fileHandle.getFile();
+                        existingContent = await file.text();
+                    } catch (e) {
+                        fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                    }
+                } else {
+                    fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                }
+
+                const finalContent = append && existingContent ? existingContent + "\n" + content : content;
+                const writable = await fileHandle.createWritable();
+                await writable.write(finalContent);
+                await writable.close();
+                dbgLog(`[保存成功] ${subDir}/${fileName}`);
+            } catch (err) {
+                dbgLog(`[保存失敗] ${err.message}`, true);
+            }
+        }
+
         async function saveApiKeyToVault(key) {
             if (!vaultDirHandle || !key) return;
-            try {
-                const settingsDir = await vaultDirHandle.getDirectoryHandle("Settings", { create: true });
-                const fileHandle = await settingsDir.getFileHandle("API_KEY.md", { create: true });
-                const writable = await fileHandle.createWritable();
-                
-                await writable.write(key.trim());
-                await writable.close();
-
-                localStorage.setItem('gemini_api_key', key.trim());
-                dbgLog("[API KEY] Settings/API_KEY.md へ正常に保存しました");
-                
-                const inputEl = document.getElementById('geminiApiKey');
-                if (inputEl) inputEl.value = key.trim();
-            } catch (err) {
-                dbgLog(`[API KEY] 保存失敗: ${err.message}`, true);
-            }
+            await writeMarkdownFile("Settings", "API_KEY.md", key.trim(), false);
+            localStorage.setItem('gemini_api_key', key.trim());
+            dbgLog("[API KEY] Settings/API_KEY.md へ正常に保存しました");
+            
+            const inputEl = document.getElementById('geminiApiKey');
+            if (inputEl) inputEl.value = key.trim();
         }
 
         async function loadApiKeyFromVault() {
@@ -422,6 +440,51 @@
             return diffCount / (newPixels.length / 4);
         }
 
+        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 7000) {
+            const apiKey = loadApiKey();
+            if (!apiKey) throw new Error("APIキーが未設定です");
+
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+            const parts = [{ text: systemInstruction }];
+
+            if (imageBase64) {
+                parts.push({
+                    inlineData: {
+                        mimeType: "image/jpeg",
+                        data: imageBase64
+                    }
+                });
+            }
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ role: "user", parts }] }),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    const errMsg = errData.error?.message || `HTTP ${response.status}`;
+                    const err = new Error(errMsg);
+                    err.status = response.status;
+                    throw err;
+                }
+
+                const data = await response.json();
+                return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+            } catch (err) {
+                clearTimeout(timeoutId);
+                throw err;
+            }
+        }
+
         async function analyzeEnvironment() {
             if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
@@ -443,13 +506,7 @@
 
             dbgLog(`[環境変化検知] 変化率 ${(diffRatio * 100).toFixed(1)}% を検知。Geminiへ問い合わせます`);
 
-            const apiKey = loadApiKey();
-            if (!apiKey) return;
-
             isApiProcessing = true;
-
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-
             const presentPersonsArray = Array.from(currentPresentPersons);
             const personContext = presentPersonsArray.length > 0 
                 ? presentPersonsArray.join('さん、') + 'さん' 
@@ -472,51 +529,11 @@
   "text": "40文字以内の話し言葉"
 }`;
 
-            const payload = {
-                contents: [
-                    {
-                        role: "user",
-                        parts: [
-                            { text: systemInstruction },
-                            {
-                                inlineData: {
-                                    mimeType: "image/jpeg",
-                                    data: frame.base64
-                                }
-                            }
-                        ]
-                    }
-                ]
-            };
-
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
-
             try {
                 dbgLog("[環境分析] 周囲の画像をGeminiマルチモーダルへ送信中...");
-                const response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeoutId);
-
-                if (response.status === 429) {
-                    dbgLog(`[環境分析] レート制限(429)発生。次回待機時間を ${envCheckBackoffDelay / 1000}秒 に延長します`, true);
-                    scheduleNextEnvCheck(envCheckBackoffDelay);
-                    envCheckBackoffDelay = Math.min(envCheckBackoffDelay * 2, 300000);
-                    return;
-                }
-
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
+                const rawText = await executeGeminiRequest(systemInstruction, frame.base64, 15000);
                 envCheckBackoffDelay = 60000;
 
-                const data = await response.json();
-                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-                
                 const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
                 if (jsonMatch) {
                     const parsed = JSON.parse(jsonMatch[0]);
@@ -544,7 +561,12 @@
                     }
                 }
             } catch (err) {
-                clearTimeout(timeoutId);
+                if (err.status === 429) {
+                    dbgLog(`[環境分析] レート制限(429)発生。次回待機時間を ${envCheckBackoffDelay / 1000}秒 に延長します`, true);
+                    scheduleNextEnvCheck(envCheckBackoffDelay);
+                    envCheckBackoffDelay = Math.min(envCheckBackoffDelay * 2, 300000);
+                    return;
+                }
                 const isAbort = err.name === 'AbortError';
                 const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                 dbgLog(`[環境分析エラー] ${errorReason}`, true);
@@ -562,11 +584,6 @@
 
         function isExactWordMatch(text, targetName) {
             if (!text || !targetName) return false;
-
-            if (targetName.length >= 4) {
-                return text.includes(targetName);
-            }
-
             const escapedName = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const pattern = new RegExp(`${escapedName}(さん|ちゃん|くん|様|が|は|に|と|の|を|って|だ|よ|？|！|\\s|$)`);
             return pattern.test(text);
@@ -634,16 +651,7 @@
                 return { emotion: 'Sad', text: "ちょっと待ってね、考え中だよ。" };
             }
 
-            const apiKey = loadApiKey();
-            if (!apiKey) {
-                dbgLog("[API Error] APIキーが未設定です", true);
-                return { emotion: 'Sad', text: "APIキーが設定されていないみたい。" };
-            }
-
             isApiProcessing = true;
-
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
             const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
             const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
@@ -667,41 +675,11 @@ Surprised: 驚き、びっくり
 Sad: 悲しい、バイバイ
 Default: その他通常会話`;
 
-            const payload = {
-                contents: [
-                    {
-                        role: "user",
-                        parts: [
-                            { text: systemInstruction }
-                        ]
-                    }
-                ]
-            };
-
             try {
                 for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 7000);
-
                     try {
                         dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
-                        const response = await fetch(endpoint, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload),
-                            signal: controller.signal
-                        });
-
-                        clearTimeout(timeoutId);
-
-                        if (!response.ok) {
-                            const errData = await response.json().catch(() => ({}));
-                            const errMsg = errData.error?.message || `HTTP ${response.status}`;
-                            throw new Error(errMsg);
-                        }
-
-                        const data = await response.json();
-                        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                        const rawText = await executeGeminiRequest(systemInstruction, null, 7000);
                         dbgLog(`[Gemini 受信テキスト] ${rawText}`);
 
                         const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
@@ -719,8 +697,6 @@ Default: その他通常会話`;
                         }
 
                     } catch (err) {
-                        clearTimeout(timeoutId);
-
                         const isAbort = err.name === 'AbortError';
                         const errorReason = isAbort ? "通信タイムアウト (7秒制限)" : err.message;
                         dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
@@ -748,7 +724,8 @@ Default: その他通常会話`;
             isConversing = false;
             pendingFaceDescriptor = null;
             pendingLocationCoords = null;
-            silenceRetryCount = 0;
+            hasUserRespondedInTurn = false;
+            hasRetriedSilence = false;
             if (safetyTimeout) {
                 clearTimeout(safetyTimeout);
                 safetyTimeout = null;
@@ -773,7 +750,6 @@ Default: その他通常会話`;
 
             rec.onstart = () => {
                 isListening = true;
-                hasRecognizedResult = false;
                 updateIndicators();
                 dbgLog("[音声認識] 聞き取り中...");
                 
@@ -788,9 +764,9 @@ Default: その他通常会話`;
             };
 
             rec.onresult = async (event) => {
-                hasRecognizedResult = true;
-                silenceRetryCount = 0;
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
+
+                hasUserRespondedInTurn = true; 
 
                 const rawTranscript = event.results[0][0].transcript.trim();
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
@@ -887,16 +863,24 @@ Default: その他通常会話`;
                 }
 
                 if (IS_AI_MODE) {
+                    // 会話中も存在人物のタイムスタンプを更新し、勝手に離脱扱いになるのを防ぐ
+                    const nowTime = Date.now();
                     knownFaces.forEach(f => {
                         if (isExactWordMatch(rawTranscript, f.name)) {
                             currentPresentPersons.add(f.name);
-                            personSeenTimestamps.set(f.name, Date.now());
+                            personSeenTimestamps.set(f.name, nowTime);
                             dbgLog(`[コンテキスト自動補完] テキストから人物「${f.name}」を正確に検出し設定しました`);
                         }
                     });
 
+                    // 現在滞在中の全人物のタイムスタンプを更新（会話中の保護）
+                    currentPresentPersons.forEach(pName => {
+                        personSeenTimestamps.set(pName, nowTime);
+                    });
+
                     const todayContext = await getTodayEpisodeText();
                     const relatedContext = await searchRelatedEpisodes(rawTranscript);
+
                     const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech, todayContext, relatedContext);
                     
                     if (chatLog) {
@@ -907,9 +891,16 @@ Default: その他通常会話`;
 
                     if (!isErrorMessage) {
                         const presentPersonsArray = Array.from(currentPresentPersons);
+
+                        let conversationText = "";
+                        if (lastPetSpeech) {
+                            conversationText += `ペット: 「${lastPetSpeech}」\n`;
+                        }
+                        conversationText += `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`;
+
                         await saveEpisodeToVault(
                             "会話の記録",
-                            `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`,
+                            conversationText,
                             currentKnownLocationName,
                             presentPersonsArray
                         );
@@ -938,15 +929,14 @@ Default: その他通常会話`;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
 
-                // 無音状態で自動終了し、発話未検出かつ会話継続中の場合は最大1回まで自動リトライ
-                if (!hasRecognizedResult && (isConversing || isWaitingForName || isWaitingForLocationName) && silenceRetryCount < 1) {
-                    silenceRetryCount++;
-                    dbgLog(`[無音検知リトライ] 音声が検出されなかったため自動で聞き取りを再開します (${silenceRetryCount}/1)`);
+                if (isConversing && !hasUserRespondedInTurn && !hasRetriedSilence && !isSleeping) {
+                    hasRetriedSilence = true;
+                    dbgLog("[音声認識] 発話未検知による無音終了。1秒後に聞き取りを1度だけ自動再試行します...");
                     setTimeout(() => {
-                        if (!isListening && (isConversing || isWaitingForName || isWaitingForLocationName)) {
+                        if (isConversing && !isListening && !isSpeaking) {
                             startListening();
                         }
-                    }, 400);
+                    }, 1000);
                 }
             };
 
@@ -960,6 +950,10 @@ Default: その他通常会話`;
 
             try {
                 isConversing = true;
+                // 新しいターン開始時にフラグを必ずリセット
+                hasUserRespondedInTurn = false;
+                hasRetriedSilence = false;
+
                 if (recognitionInstance) {
                     try { 
                         recognitionInstance.onend = null;
@@ -1159,35 +1153,8 @@ Default: その他通常会話`;
             
             episodeBlock += `\n${contentText}\n`;
 
-            try {
-                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: true });
-                let fileHandle = null;
-                let isNewFile = false;
-                
-                try {
-                    fileHandle = await dirHandle.getFileHandle(filename, { create: false });
-                } catch (e) {
-                    fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-                    isNewFile = true;
-                }
-
-                let fullContent = "";
-                if (isNewFile) {
-                    fullContent = `# ${dateStr} の記録\n` + episodeBlock;
-                } else {
-                    const file = await fileHandle.getFile();
-                    const existingText = await file.text();
-                    fullContent = existingText + episodeBlock;
-                }
-
-                const writable = await fileHandle.createWritable();
-                await writable.write(fullContent);
-                await writable.close();
-                
-                dbgLog(`[エピソード保存] Episodes/${filename} へ追記完了`);
-            } catch (err) {
-                dbgLog(`[エピソード保存エラー] ${err.message}`, true);
-            }
+            // リファクタリング: writeMarkdownFile を使って追記処理を一約
+            await writeMarkdownFile("Episodes", filename, episodeBlock, true);
         }
 
         async function hasGreetedTodayFromVault(personName) {
@@ -1241,13 +1208,8 @@ Default: その他通常会話`;
 
         async function generateTopicFromContext(personName, todayContext) {
             if (isApiProcessing) return { emotion: 'Happy', text: `${personName}さん、何か面白いことあった？` };
-            
-            const apiKey = loadApiKey();
-            if (!apiKey) return { emotion: 'Happy', text: `${personName}さん、また会えたね！` };
 
             isApiProcessing = true;
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-
             const hour = new Date().getHours();
             let timeOfDay = "昼";
             if (hour >= 5 && hour < 11) timeOfDay = "朝";
@@ -1279,26 +1241,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 - 以下のJSONフォーマットのみで回答してください:
 {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
 
-            const payload = {
-                contents: [{ role: "user", parts: [{ text: systemInstruction }] }]
-            };
-
             try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 7000);
-
-                const response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeoutId);
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-                const data = await response.json();
-                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                const rawText = await executeGeminiRequest(systemInstruction, null, 7000);
                 const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
 
                 if (jsonMatch) {
@@ -1339,27 +1283,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 descriptor: descriptor
             });
             dbgLog(`[人物登録完了] Persons/${filename} を作成しました`);
-        }
-
-        async function writeMarkdownFile(subDir, fileName, content, append = false) {
-            if (!vaultDirHandle) return;
-            try {
-                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
-                const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-
-                if (append) {
-                    const file = await fileHandle.getFile();
-                    const existingContent = await file.text();
-                    content = existingContent + "\n" + content;
-                }
-
-                const writable = await fileHandle.createWritable();
-                await writable.write(content);
-                await writable.close();
-                dbgLog(`[保存成功] ${subDir}/${fileName}`);
-            } catch (err) {
-                dbgLog(`[保存失敗] ${err.message}`, true);
-            }
         }
 
         async function loadKnownFacesFromVault() {
