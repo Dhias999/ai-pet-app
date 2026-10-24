@@ -155,7 +155,7 @@
             margin-top: 6px;
         }
 
-        /* パネルエリア（初期状態は非表示） */
+        /* パネルエリア */
         .control-panel {
             display: none;
             width: 320px;
@@ -167,7 +167,7 @@
         /* 簡易デバッグ用コンソール */
         .debug-console {
             width: 320px;
-            height: 180px;
+            height: 160px;
             background: #000;
             border: 1px solid #00b894;
             border-radius: 8px;
@@ -194,6 +194,17 @@
             padding: 4px 8px;
             border-radius: 6px;
             pointer-events: none;
+        }
+
+        .api-key-input {
+            width: 100%;
+            font-size: 12px;
+            background: #252525;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 6px;
+            border-radius: 6px;
+            box-sizing: border-box;
         }
     </style>
 </head>
@@ -231,8 +242,13 @@
         </div>
     </div>
 
-    <!-- コントロールパネル（音声選択＆ログ） -->
+    <!-- コントロールパネル（音声選択＆APIキー＆ログ） -->
     <div id="controlPanel" class="control-panel">
+        <div>
+            <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">Gemini API キー:</label>
+            <input type="password" id="geminiApiKey" class="api-key-input" placeholder="AIキーを入力" onchange="saveApiKey(this.value)">
+        </div>
+
         <div>
             <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">音声選択:</label>
             <select id="voiceSelect" onchange="changeVoice(this)" style="width: 100%; font-size: 12px; background: #252525; color: #fff; border: 1px solid #444; padding: 6px; border-radius: 6px; box-sizing: border-box;"></select>
@@ -265,7 +281,7 @@
         });
 
         const IS_TEST_MODE = false; 
-        const IS_AI_MODE = false;
+        let IS_AI_MODE = true;
 
         let vaultDirHandle = null; 
         let knownFaces = []; 
@@ -285,6 +301,91 @@
         let gazeTimer = null;
         let safetyTimeout = null;
         let isSpeaking = false;
+
+        function saveApiKey(key) {
+            localStorage.setItem('gemini_api_key', key.trim());
+            dbgLog("[API KEY] キーの保存を実行しました");
+        }
+
+        function loadApiKey() {
+            const savedKey = localStorage.getItem('gemini_api_key') || '';
+            const inputEl = document.getElementById('geminiApiKey');
+            if (inputEl) inputEl.value = savedKey;
+            return savedKey;
+        }
+
+        // --- VaultフォルダからAPIキーを自動抽出 ---
+        async function loadApiKeyFromVault() {
+            if (!vaultDirHandle) return null;
+            try {
+                const settingsDir = await vaultDirHandle.getDirectoryHandle("Settings", { create: false });
+                const fileHandle = await settingsDir.getFileHandle("API_KEY.md", { create: false });
+                const file = await fileHandle.getFile();
+                const text = await file.text();
+                const key = text.trim();
+                if (key) {
+                    localStorage.setItem('gemini_api_key', key);
+                    dbgLog("[API KEY] Settings/API_KEY.md からキーを自動読込しました");
+                    const inputEl = document.getElementById('geminiApiKey');
+                    if (inputEl) inputEl.value = key;
+                    return key;
+                }
+            } catch (err) {
+                dbgLog("[API KEY] Vault内に Settings/API_KEY.md は存在しません（手動入力可）");
+            }
+            return null;
+        }
+
+        // --- Gemini API 呼び出し処理 ---
+        async function callGeminiAPI(userPrompt) {
+            const apiKey = loadApiKey();
+            if (!apiKey) {
+                dbgLog("[API Error] APIキーが未設定です", true);
+                return "APIキーが設定されていないみたい。VaultのSettings/API_KEY.mdに保存するか、デバッグパネルで登録してね！";
+            }
+
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+            const systemInstruction = "あなたはフレンドリーで可愛らしいAIペットです。ユーザーの言葉に対して、短く（40文字以内）、明るく親しみやすい言葉遣い（〜だよ、〜かな？など）で答えてください。";
+            
+            const payload = {
+                contents: [
+                    {
+                        role: "user",
+                        parts: [
+                            { text: `${systemInstruction}\n\nユーザーの発言: ${userPrompt}` }
+                        ]
+                    }
+                ]
+            };
+
+            try {
+                dbgLog(`[Gemini リクエスト送信] "${userPrompt}"`);
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error?.message || `HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+                if (aiText) {
+                    dbgLog(`[Gemini レスポンス受信] "${aiText}"`);
+                    return aiText;
+                } else {
+                    throw new Error("応答テキストの取得に失敗しました");
+                }
+            } catch (err) {
+                dbgLog(`[Gemini APIエラー] ${err.message}`, true);
+                return "ごめんね、うまくお返事が考えられなかったよ。";
+            }
+        }
 
         function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
@@ -329,7 +430,7 @@
                 }, 20000);
             };
 
-            rec.onresult = (event) => {
+            rec.onresult = async (event) => {
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
                 const rawTranscript = event.results[0][0].transcript.trim();
@@ -349,6 +450,7 @@
                         panel.style.display = isCurrentlyHidden ? 'flex' : 'none';
                         dbgLog(`[UI] コントロールパネルを${isCurrentlyHidden ? '表示' : '非表示'}にしました`);
                         initVoices();
+                        loadApiKey();
 
                         setEmotion('Happy');
                         speak(isCurrentlyHidden ? "デバッグパネルを表示したよ！" : "デバッグパネルを隠したよ！", () => {
@@ -413,6 +515,21 @@
                         setTimeout(() => {
                             resetInteractionState(8000);
                         }, 2000);
+                    });
+                    return;
+                }
+
+                // ★ AI 会話受け答え処理（Gemini API 呼び出し）
+                if (IS_AI_MODE) {
+                    setEmotion('Happy');
+                    const aiReply = await callGeminiAPI(rawTranscript);
+                    
+                    if (chatLog) {
+                        chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiReply}`;
+                    }
+
+                    speak(aiReply, () => {
+                        resetInteractionState(8000);
                     });
                     return;
                 }
@@ -506,6 +623,7 @@
         window.addEventListener('DOMContentLoaded', () => {
             setEmotion('Default');
             initVoices();
+            loadApiKey();
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.onvoiceschanged = () => {
                     if (!voicesInitialized) initVoices();
@@ -834,7 +952,6 @@
                     window.speechSynthesis.speak(dummy);
                 }
 
-                // ★ PWAでのマイク権限をユーザージェスチャ内で確実に確立する
                 badge.innerText = "マイク確認中";
                 dbgLog("マイク（音声入力）の権限を要求中...");
                 try {
@@ -901,6 +1018,7 @@
                 badge.innerText = "記憶を復元中";
                 await loadKnownFacesFromVault();
                 await loadKnownLocationsFromVault();
+                await loadApiKeyFromVault(); // ★ VaultからAPIキーの自動読込
 
                 badge.innerText = "位置情報確認";
                 const locResult = await checkOrAskLocation();
@@ -1058,11 +1176,9 @@
 
                 if (knownFaces.length > 0) {
                     const labeledDescriptors = knownFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [f.descriptor]));
-                    // ★ 閾値を 0.5 から 0.6（標準値）へ拡張
                     const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6);
                     const bestMatch = faceMatcher.findBestMatch(currentDescriptor);
 
-                    // 距離スコアのログ出力
                     dbgLog(`[顔照合結果] 判定: ${bestMatch.label}, 距離: ${bestMatch.distance.toFixed(3)} (閾値: 0.600)`);
 
                     if (bestMatch && bestMatch.label !== 'unknown') {
@@ -1084,7 +1200,6 @@
                         scheduleNextVisionCheck(8000);
                     }
                 } else {
-                    // 未知の顔を検知した場合
                     isConversing = true;
                     setEmotion('Surprised');
                     pendingFaceDescriptor = currentDescriptor;
@@ -1113,7 +1228,6 @@
 
         // --- 画面（ペットステージ）タップ時の動作 ---
         function handleStageClick() {
-            // ★ ペットの発話中はタップを受け付けず無視するガード
             if (isSpeaking) {
                 dbgLog("[タップ無視] ペットが発話中のためタップを受け付けません");
                 return;
