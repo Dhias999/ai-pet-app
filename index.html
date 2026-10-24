@@ -291,7 +291,11 @@
         let blinkTimer = null;
         let gazeTimer = null;
         let safetyTimeout = null;
+        let envCheckTimer = null;
         let isSpeaking = false;
+
+        // 画像差分検出用キャッシュ
+        let lastFrameImageData = null;
 
         function loadApiKey() {
             const savedKey = localStorage.getItem('gemini_api_key') || '';
@@ -341,7 +345,170 @@
             return null;
         }
 
-        // --- Gemini API 呼び出し（7秒タイムアウト ＆ 自動リトライ機能付き） ---
+        // --- カメラ画像データ・ピクセル配列キャプチャ機能 ---
+        function captureCameraFrame() {
+            const videoEl = document.getElementById('cameraStream');
+            if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
+                return null;
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = 160; // 差分計算用に軽量化
+            canvas.height = 120;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+            
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+            return {
+                base64: dataUrl.split(',')[1] || null,
+                rawPixels: imageData.data
+            };
+        }
+
+        // --- 簡易ピクセル差分計算（動き・変化の検知） ---
+        function calculateImageDifference(newPixels, oldPixels) {
+            if (!oldPixels || newPixels.length !== oldPixels.length) return 1.0; // 初回は100%扱い
+            let diffCount = 0;
+            const threshold = 35; // 変化とみなす輝度閾値
+
+            for (let i = 0; i < newPixels.length; i += 4) {
+                // RGBAの平均値で簡易輝度比較
+                const avgNew = (newPixels[i] + newPixels[i+1] + newPixels[i+2]) / 3;
+                const avgOld = (oldPixels[i] + oldPixels[i+1] + oldPixels[i+2]) / 3;
+                if (Math.abs(avgNew - avgOld) > threshold) {
+                    diffCount++;
+                }
+            }
+            return diffCount / (newPixels.length / 4); // 画面全体に対する変化率 (0.0 ～ 1.0)
+        }
+
+        // --- 周囲環境の自動判定（統合コンテキスト＆差分検知付き） ---
+        async function analyzeEnvironment() {
+            if (isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
+
+            const frame = captureCameraFrame();
+            if (!frame || !frame.base64) {
+                dbgLog("[環境分析] カメラ画像が取得できないためスキップします");
+                scheduleNextEnvCheck(15000);
+                return;
+            }
+
+            // 1. 前回画像との差分チェック（5%以上の変化があった場合のみ送信）
+            const diffRatio = calculateImageDifference(frame.rawPixels, lastFrameImageData);
+            lastFrameImageData = frame.rawPixels;
+
+            if (diffRatio < 0.05) {
+                dbgLog(`[環境分析スキップ] 周囲に大きな変化はありません (変化率: ${(diffRatio * 100).toFixed(1)}%)`);
+                scheduleNextEnvCheck(45000);
+                return;
+            }
+
+            dbgLog(`[環境変化検知] 変化率 ${(diffRatio * 100).toFixed(1)}% を検知。Geminiへ問い合わせます`);
+
+            const apiKey = loadApiKey();
+            if (!apiKey) return;
+
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+
+            // 2. 顔認識・位置情報の統合コンテキスト構築
+            const presentPersonsArray = Array.from(currentPresentPersons);
+            const personContext = presentPersonsArray.length > 0 
+                ? presentPersonsArray.join('さん、') + 'さん' 
+                : '誰もいない（または特定できない）';
+
+            const systemInstruction = `あなたはAIペットです。現在の状態と送られたカメラ画像を見て、周りの状況（明るさ、出来事、周囲の物体、ユーザーの動作など）を観察し、独り言として話しかけてください。
+
+【現在の統合メタデータ】
+- 現在地: ${currentKnownLocationName}
+- 目の前にいる人物: ${personContext}
+
+【判定条件】
+特段変わったことや反応すべき出来事がなければ "shouldSpeak": false と答えて静かにしてください。
+何か面白い変化や話しかけるべき状態があれば "shouldSpeak": true としてください。
+
+以下のJSON形式のみで回答してください:
+{
+  "shouldSpeak": boolean,
+  "emotion": "Happy" | "Anger" | "Surprised" | "Sad" | "Default",
+  "text": "40文字以内の話し言葉"
+}`;
+
+            const payload = {
+                contents: [
+                    {
+                        role: "user",
+                        parts: [
+                            { text: systemInstruction },
+                            {
+                                inlineData: {
+                                    mimeType: "image/jpeg",
+                                    data: frame.base64
+                                }
+                            }
+                        ]
+                    }
+                ]
+            };
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+            try {
+                dbgLog("[環境分析] 周囲の画像をGeminiマルチモーダルへ送信中...");
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                
+                const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    dbgLog(`[環境分析結果] shouldSpeak:${parsed.shouldSpeak}, 感情:${parsed.emotion}, テキスト:"${parsed.text}"`);
+
+                    if (parsed.shouldSpeak && parsed.text && !isSpeaking && !isConversing) {
+                        const chatLog = document.getElementById('chatLog');
+                        if (chatLog) {
+                            chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
+                        }
+
+                        // 3. エピソード（Episodes/）へ自動ログ保存
+                        await saveEpisodeToVault(
+                            "環境の自動観察",
+                            `カメラで周囲の様子を察知して発話した: 「${parsed.text}」`,
+                            currentKnownLocationName,
+                            presentPersonsArray
+                        );
+
+                        setEmotion(parsed.emotion || 'Happy');
+                        speak(parsed.text, () => {
+                            setEmotion('Default');
+                            scheduleNextEnvCheck(45000);
+                        });
+                        return;
+                    }
+                }
+            } catch (err) {
+                clearTimeout(timeoutId);
+                dbgLog(`[環境分析エラー] ${err.message}`, true);
+            }
+
+            scheduleNextEnvCheck(45000);
+        }
+
+        function scheduleNextEnvCheck(delay = 45000) {
+            if (envCheckTimer) clearTimeout(envCheckTimer);
+            envCheckTimer = setTimeout(analyzeEnvironment, delay);
+        }
+
         async function callGeminiAPI(userPrompt, maxRetries = 3) {
             const apiKey = loadApiKey();
             if (!apiKey) {
@@ -375,7 +542,6 @@ Default: その他通常会話`;
             };
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                // 7秒間で通信を強制遮断する AbortController を作成
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 7000);
 
@@ -445,9 +611,10 @@ Default: その他通常会話`;
                 clearTimeout(safetyTimeout);
                 safetyTimeout = null;
             }
-            setEmotion('Default');
+            if (!isSleeping) setEmotion('Default');
             scheduleNextVisionCheck(delay);
-            dbgLog("[SYSTEM] インタラクション状態をリセットし、顔認証ループに復帰しました");
+            scheduleNextEnvCheck(45000);
+            dbgLog("[SYSTEM] インタラクション状態をリセットしました");
         }
 
         // --- 音声認識（SpeechRecognition）処理 ---
@@ -504,6 +671,16 @@ Default: その他通常会話`;
                             resetInteractionState(8000);
                         });
                     }
+                    return;
+                }
+
+                if (transcript.includes('スリープ') || transcript.includes('すりーぷ') || transcript.includes('sleep')) {
+                    isSleeping = true;
+                    setEmotion('SLEEP');
+                    dbgLog("[SYSTEM] 音声コマンドにより SLEEP モードへ移行しました");
+                    speak("おやすみなさい...", () => {
+                        resetInteractionState(1000);
+                    });
                     return;
                 }
 
@@ -1093,6 +1270,7 @@ Default: その他通常会話`;
                 speak(welcomeMsg, () => {
                     setEmotion('Default');
                     scheduleNextVisionCheck(2000);
+                    scheduleNextEnvCheck(15000);
                 });
 
             } catch (err) {
