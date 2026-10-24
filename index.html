@@ -1561,12 +1561,11 @@ ${todayContext || "（まだ目立った記録はありません）"}
                     isSpeaking = false;
                     stopLipSync();
 
-                    // 発話内容が質問・疑問形だった場合は自動で音声聞き取りを開始
                     if (!isSleeping && isQuestionText(text)) {
                         dbgLog("[質問検知] 疑問形の発話が完了したため、600ms後に自動で音声入力を開始します");
                         setTimeout(() => {
                             startListening();
-                        }, 600); // 誤認識を防ぐために600msのウェイトを設定
+                        }, 600);
                     } else if (callback) {
                         callback();
                     }
@@ -1601,29 +1600,35 @@ ${todayContext || "（まだ目立った記録はありません）"}
             visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, delay);
         }
 
+        // ★ 頻度抑制・排他制御を組み込んだ顔認識処理
         async function performFaceRecognitionCheck() {
-            if (isApiProcessing || isSleeping || isConversing || !isActivated || isWaitingForName || isWaitingForLocationName) return;
+            // 他の処理（API通信・スリープ・会話・音声入力・発話中）実行中はスキップ
+            if (isApiProcessing || isSleeping || isConversing || isListening || isSpeaking || !isActivated || isWaitingForName || isWaitingForLocationName) {
+                scheduleNextVisionCheck(6000);
+                return;
+            }
 
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
-                dbgLog("[顔認識スキップ] ビデオがまだ準備できていません");
-                scheduleNextVisionCheck(4000);
+                scheduleNextVisionCheck(5000);
                 return;
             }
 
             try {
                 dbgLog("[顔認識] 顔検出を試行中...");
-                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 });
+                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
                 const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
+                // 画面内に誰も映っていない場合
                 if (!detections) {
-                    dbgLog("[顔認識] 顔は検出されませんでした");
-                    currentPresentPersons.clear();
-                    scheduleNextVisionCheck(3000);
+                    if (currentPresentPersons.size > 0) {
+                        dbgLog("[顔認識] 画面内から人がいなくなりました");
+                        currentPresentPersons.clear();
+                    }
+                    scheduleNextVisionCheck(5000);
                     return;
                 }
 
-                dbgLog("[顔認識] 顔を検知しました！照合中...");
                 const currentDescriptor = detections.descriptor;
                 let bestMatchName = null;
 
@@ -1632,17 +1637,20 @@ ${todayContext || "（まだ目立った記録はありません）"}
                     const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6);
                     const bestMatch = faceMatcher.findBestMatch(currentDescriptor);
 
-                    dbgLog(`[顔照合結果] 判定: ${bestMatch.label}, 距離: ${bestMatch.distance.toFixed(3)} (閾値: 0.600)`);
-
                     if (bestMatch && bestMatch.label !== 'unknown') {
                         bestMatchName = bestMatch.label;
                     }
                 }
 
                 if (bestMatchName) {
+                    // ★ すでに認識済みの人物がカメラの前に滞在し続けている場合は認識ループを抑制
+                    if (currentPresentPersons.has(bestMatchName)) {
+                        dbgLog(`[顔認識] ${bestMatchName} さんは滞在地です（チェック一時保留）`);
+                        scheduleNextVisionCheck(20000); // 20秒後まで判定を保留
+                        return;
+                    }
+
                     currentPresentPersons.add(bestMatchName);
-                    
-                    // 本日すでに挨拶済みか Episodes/YYYY-MM-DD.md から確認
                     const alreadyGreeted = await hasGreetedTodayFromVault(bestMatchName);
 
                     if (!alreadyGreeted) {
@@ -1660,7 +1668,7 @@ ${todayContext || "（まだ目立った記録はありません）"}
 
                         speak(greetingText, () => {
                             setEmotion('Default');
-                            scheduleNextVisionCheck(10000);
+                            scheduleNextVisionCheck(25000);
                         });
                     } else {
                         dbgLog(`[顔認識] ${bestMatchName} さんは本日あいさつ済みのため、本日のエピソードから話題を生成します`);
@@ -1684,7 +1692,7 @@ ${todayContext || "（まだ目立った記録はありません）"}
 
                         speak(topicResult.text, () => {
                             setEmotion('Default');
-                            scheduleNextVisionCheck(20000);
+                            scheduleNextVisionCheck(30000);
                         });
                     }
                 } else {
@@ -1701,7 +1709,7 @@ ${todayContext || "（まだ目立った記録はありません）"}
                         }
                     }, 25000);
 
-                    const unknownMsg = "あれ？初めて見るお顔だね。お名前を教えて！画面をタップして教えてね。";
+                    const unknownMsg = "あれ？初めて見るお顔だね。お名前を教えて！";
                     const chatLog = document.getElementById('chatLog');
                     if (chatLog) chatLog.innerHTML = `<strong>ペット:</strong> ${unknownMsg}`;
 
@@ -1710,7 +1718,7 @@ ${todayContext || "（まだ目立った記録はありません）"}
 
             } catch (err) {
                 dbgLog(`[顔認識エラー] ${err.message}`, true);
-                resetInteractionState(8000);
+                resetInteractionState(10000);
             }
         }
 
