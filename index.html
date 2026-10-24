@@ -293,14 +293,12 @@
         let envCheckTimer = null;
         let isSpeaking = false;
 
-        // API排他ロック＆レート制限バックオフ制御用変数
         let isApiProcessing = false;
-        let envCheckBackoffDelay = 60000; // 初期値 60秒
+        let envCheckBackoffDelay = 60000;
         let wakeLockObj = null;
 
         let lastFrameImageData = null;
 
-        // Screen Wake Lock (画面常時点灯・スリープ防止)
         async function requestWakeLock() {
             try {
                 if ('wakeLock' in navigator) {
@@ -316,7 +314,6 @@
             }
         }
 
-        // 画面フォーカス復帰時にWakeLockとカメラ再生を再取得
         document.addEventListener('visibilitychange', async () => {
             if (document.visibilityState === 'visible') {
                 dbgLog("[SYSTEM] 画面復帰を検知。WakeLockとカメラ状態を再点検します");
@@ -385,7 +382,6 @@
             return null;
         }
 
-        // 送信画像の超軽量化 (320x240 / 画質0.4)
         function captureCameraFrame() {
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
@@ -420,7 +416,6 @@
             return diffCount / (newPixels.length / 4);
         }
 
-        // API排他ロック ＆ 指数バックオフ付き環境判定
         async function analyzeEnvironment() {
             if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
@@ -447,7 +442,8 @@
 
             isApiProcessing = true;
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            // モデル名を gemini-3.8-flash に更新
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const presentPersonsArray = Array.from(currentPresentPersons);
             const personContext = presentPersonsArray.length > 0 
@@ -573,7 +569,8 @@
 
             isApiProcessing = true;
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            // モデル名を gemini-3.8-flash に更新
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
             const systemInstruction = `あなたは可愛らしいAIペットです。ユーザーの発言に対して、以下のJSON形式でのみ答えてください。他の余計な文やコードブロック指定（\`\`\`jsonなど）は含めないでください。
 
@@ -1025,7 +1022,6 @@ Default: その他通常会話`;
             dbgLog("待機アニメーション（まばたき・視線移動）開始");
         }
 
-        // Obsidian の Episodes/YYYY-MM-DD.md への日別まとめ・追記保存ロジック
         async function saveEpisodeToVault(episodeTitle, contentText, locationName, personNames = []) {
             if (!vaultDirHandle) return;
 
@@ -1079,7 +1075,6 @@ Default: その他通常会話`;
             }
         }
 
-        // 本日挨拶済みか Vault から判定
         async function hasGreetedTodayFromVault(personName) {
             if (!vaultDirHandle) return false;
             const dateStr = new Date().toISOString().split('T')[0];
@@ -1096,7 +1091,6 @@ Default: その他通常会話`;
             }
         }
 
-        // 本日のエピソード文脈を取得
         async function getTodayEpisodeText() {
             if (!vaultDirHandle) return "";
             const dateStr = new Date().toISOString().split('T')[0];
@@ -1112,7 +1106,7 @@ Default: その他通常会話`;
             }
         }
 
-        // 本日のエピソードをもとに話題を生成
+        // 本日のエピソード＋時間帯＋場所＋多様な視点を組み合わせて話題を生成する関数
         async function generateTopicFromContext(personName, todayContext) {
             if (isApiProcessing) return { emotion: 'Happy', text: `${personName}さん、何か面白いことあった？` };
             
@@ -1120,19 +1114,39 @@ Default: その他通常会話`;
             if (!apiKey) return { emotion: 'Happy', text: `${personName}さん、また会えたね！` };
 
             isApiProcessing = true;
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-            const systemInstruction = `あなたは可愛らしいAIペットです。すでに今日一度挨拶をした相手「${personName}さん」が目の前にいます。
-これまでの本日のエピソード（会話ログや出来事）を参考にして、${personName}さんに親しみを込めて話しかける話題や質問を1つ考えてください。
+            // 観点1: 時間帯メタデータ（朝・昼・夕方・夜・深夜）の算出
+            const hour = new Date().getHours();
+            let timeOfDay = "昼";
+            if (hour >= 5 && hour < 11) timeOfDay = "朝";
+            else if (hour >= 11 && hour < 16) timeOfDay = "昼";
+            else if (hour >= 16 && hour < 19) timeOfDay = "夕方";
+            else if (hour >= 19 && hour < 23) timeOfDay = "夜";
+            else timeOfDay = "深夜";
 
-【本日のエピソード記録】
-${todayContext || "（まだ目立った記録はありません）"}
+            const systemInstruction = `あなたは可愛らしく少し気まぐれなAIペットです。
+        今日すでに一度挨拶をした相手「${personName}さん」が目の前にいます。
 
-【条件】
-- 過去の会話や出来事に少し触れつつ、自然に話しかけてください。
-- 40文字以内の話し言葉で短く話しかけてください。
-- 以下のJSONフォーマットのみで回答してください:
-{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
+        【現在のシチュエーション】
+        - 現在の時間帯: ${timeOfDay} (${hour}時)
+        - 現在地: ${currentKnownLocationName}
+
+        【本日のエピソード記録】
+        ${todayContext || "（※本日最初の再会です。過去の会話ログはありません）"}
+
+        【話題生成のルール】
+        1. **エピソード記録がある場合**: 過去の会話や出来事の文脈に触れて、その後の経過や感想を聞いてみてください。
+        2. **エピソード記録がない場合**: 毎回決まり文句にならないよう、以下の切り口から1つをランダムに選んで話しかけてください。
+        - 【時間帯・食事】("${timeOfDay}" に合わせたご飯や休憩の話題)
+        - 【場所の文脈】("現在地: ${currentKnownLocationName}" での過ごし方や居心地)
+        - 【気分・体調】(疲れ具合、リラックス度、気分の確認)
+        - 【ペットらしい疑問】(「何してるの？」「遊んでくれる？」など無邪気な質問)
+
+        【共通条件】
+        - 40文字以内の話し言葉で短く自然に話しかけてください。
+        - 以下のJSONフォーマットのみで回答してください:
+        {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
 
             const payload = {
                 contents: [{ role: "user", parts: [{ text: systemInstruction }] }]
@@ -1158,9 +1172,10 @@ ${todayContext || "（まだ目立った記録はありません）"}
 
                 if (jsonMatch) {
                     const parsed = JSON.parse(jsonMatch[0]);
+                    // ★ パース成功時はここで即座に生成結果を返却！
                     return {
                         emotion: parsed.emotion || 'Happy',
-                        text: parsed.text || `${personName}さん、また会えたね！`
+                        text: parsed.text || `${personName}さん、調子はどう？`
                     };
                 }
             } catch (err) {
@@ -1169,7 +1184,16 @@ ${todayContext || "（まだ目立った記録はありません）"}
                 isApiProcessing = false;
             }
 
-            return { emotion: 'Happy', text: `${personName}さん、調子はどう？` };
+            // ★ 万が一の通信失敗時もバリエーションを持たせるためのフォールバック
+            const fallbackTopics = [
+                `${personName}さん、何か面白いことあった？`,
+                `${personName}さん、調子はどう？`,
+                `${personName}さん、また会えて嬉しいな！`,
+                `${personName}さん、のんびりできてる？`
+            ];
+            const randomTopic = fallbackTopics[Math.floor(Math.random() * fallbackTopics.length)];
+
+            return { emotion: 'Happy', text: randomTopic };
         }
 
         async function savePersonToVault(personName, descriptor) {
@@ -1530,14 +1554,12 @@ ${todayContext || "（まだ目立った記録はありません）"}
             if (mouth) mouth.setAttribute('d', preset.mouthD);
         }
 
-        // テキストが疑問形・質問文かを判定する関数
         function isQuestionText(text) {
             if (!text) return false;
             const questionRegex = /[？?]|(かな|ですか|どう|教えて|なの|かい|うか|何|だれ|どこ|いつ|なぜ|どうして)[。！!]?$/;
             return questionRegex.test(text.trim());
         }
 
-        // 発話処理（質問時は 600ms 後に自動で音声入力へ）
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
 
@@ -1600,9 +1622,7 @@ ${todayContext || "（まだ目立った記録はありません）"}
             visionTimer = setTimeout(() => { performFaceRecognitionCheck(); }, delay);
         }
 
-        // ★ 頻度抑制・排他制御を組み込んだ顔認識処理
         async function performFaceRecognitionCheck() {
-            // 他の処理（API通信・スリープ・会話・音声入力・発話中）実行中はスキップ
             if (isApiProcessing || isSleeping || isConversing || isListening || isSpeaking || !isActivated || isWaitingForName || isWaitingForLocationName) {
                 scheduleNextVisionCheck(6000);
                 return;
@@ -1619,7 +1639,6 @@ ${todayContext || "（まだ目立った記録はありません）"}
                 const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
                 const detections = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();
 
-                // 画面内に誰も映っていない場合
                 if (!detections) {
                     if (currentPresentPersons.size > 0) {
                         dbgLog("[顔認識] 画面内から人がいなくなりました");
@@ -1643,10 +1662,9 @@ ${todayContext || "（まだ目立った記録はありません）"}
                 }
 
                 if (bestMatchName) {
-                    // ★ すでに認識済みの人物がカメラの前に滞在し続けている場合は認識ループを抑制
                     if (currentPresentPersons.has(bestMatchName)) {
                         dbgLog(`[顔認識] ${bestMatchName} さんは滞在地です（チェック一時保留）`);
-                        scheduleNextVisionCheck(20000); // 20秒後まで判定を保留
+                        scheduleNextVisionCheck(20000);
                         return;
                     }
 
