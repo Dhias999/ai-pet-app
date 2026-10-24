@@ -294,7 +294,35 @@
         let envCheckTimer = null;
         let isSpeaking = false;
 
+        // ★ API排他ロック＆レート制限バックオフ制御用変数
+        let isApiProcessing = false;
+        let envCheckBackoffDelay = 60000; // 初期値 60秒
+        let wakeLockObj = null;
+
         let lastFrameImageData = null;
+
+        // ★ 改善策1: Screen Wake Lock (画面常時点灯・スリープ防止)
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLockObj = await navigator.wakeLock.request('screen');
+                    dbgLog("[SYSTEM] 画面常時点灯（スリープ防止）を有効化しました");
+                    
+                    wakeLockObj.addEventListener('release', () => {
+                        dbgLog("[SYSTEM] 画面常時点灯が解除されました", true);
+                    });
+                }
+            } catch (err) {
+                dbgLog(`[WakeLockエラー] ${err.message}`, true);
+            }
+        }
+
+        // 画面フォーカス復帰時にWakeLockを再取得
+        document.addEventListener('visibilitychange', async () => {
+            if (wakeLockObj !== null && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
 
         function loadApiKey() {
             const savedKey = localStorage.getItem('gemini_api_key') || '';
@@ -344,19 +372,21 @@
             return null;
         }
 
+        // ★ 改善策2: 送信画像の超軽量化 (320x240 / 画質0.4)
         function captureCameraFrame() {
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
                 return null;
             }
             const canvas = document.createElement('canvas');
-            canvas.width = 160;
-            canvas.height = 120;
+            canvas.width = 320;
+            canvas.height = 240;
             const ctx = canvas.getContext('2d');
             ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
             
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+            // 画質を 0.4 に圧縮してファイルサイズを劇的に短縮
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.4);
             return {
                 base64: dataUrl.split(',')[1] || null,
                 rawPixels: imageData.data
@@ -378,8 +408,9 @@
             return diffCount / (newPixels.length / 4);
         }
 
+        // ★ 改善策3: API排他ロック ＆ 指数バックオフ付き環境判定
         async function analyzeEnvironment() {
-            if (isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
+            if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
 
             const frame = captureCameraFrame();
             if (!frame || !frame.base64) {
@@ -393,7 +424,7 @@
 
             if (diffRatio < 0.05) {
                 dbgLog(`[環境分析スキップ] 周囲に大きな変化はありません (変化率: ${(diffRatio * 100).toFixed(1)}%)`);
-                scheduleNextEnvCheck(45000);
+                scheduleNextEnvCheck(envCheckBackoffDelay);
                 return;
             }
 
@@ -401,6 +432,9 @@
 
             const apiKey = loadApiKey();
             if (!apiKey) return;
+
+            // API通信排他ロック獲得
+            isApiProcessing = true;
 
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
@@ -443,7 +477,6 @@
                 ]
             };
 
-            // タイムアウト設定を 15秒 (15000ms) に延長
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
 
@@ -458,7 +491,18 @@
 
                 clearTimeout(timeoutId);
 
+                // ★ 429 レート制限時の指数バックオフ対応
+                if (response.status === 429) {
+                    dbgLog(`[環境分析] レート制限(429)発生。次回待機時間を ${envCheckBackoffDelay / 1000}秒 に延長します`, true);
+                    scheduleNextEnvCheck(envCheckBackoffDelay);
+                    envCheckBackoffDelay = Math.min(envCheckBackoffDelay * 2, 300000); // 最大5分(300秒)まで倍増
+                    return;
+                }
+
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                // 正常通信成功時はバックオフ間隔を初期値(60秒)にリセット
+                envCheckBackoffDelay = 60000;
 
                 const data = await response.json();
                 const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
@@ -484,7 +528,7 @@
                         setEmotion(parsed.emotion || 'Happy');
                         speak(parsed.text, () => {
                             setEmotion('Default');
-                            scheduleNextEnvCheck(45000);
+                            scheduleNextEnvCheck(envCheckBackoffDelay);
                         });
                         return;
                     }
@@ -494,22 +538,32 @@
                 const isAbort = err.name === 'AbortError';
                 const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                 dbgLog(`[環境分析エラー] ${errorReason}`, true);
+            } finally {
+                // 通信完了後に排他ロック解除
+                isApiProcessing = false;
             }
 
-            scheduleNextEnvCheck(45000);
+            scheduleNextEnvCheck(envCheckBackoffDelay);
         }
 
-        function scheduleNextEnvCheck(delay = 45000) {
+        function scheduleNextEnvCheck(delay = 60000) {
             if (envCheckTimer) clearTimeout(envCheckTimer);
             envCheckTimer = setTimeout(analyzeEnvironment, delay);
         }
 
         async function callGeminiAPI(userPrompt, maxRetries = 3) {
+            if (isApiProcessing) {
+                dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
+                return { emotion: 'Sad', text: "ちょっと待ってね、考え中だよ。" };
+            }
+
             const apiKey = loadApiKey();
             if (!apiKey) {
                 dbgLog("[API Error] APIキーが未設定です", true);
                 return { emotion: 'Sad', text: "APIキーが設定されていないみたい。" };
             }
+
+            isApiProcessing = true;
 
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
@@ -536,63 +590,67 @@ Default: その他通常会話`;
                 ]
             };
 
-            for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 7000);
+            try {
+                for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 7000);
 
-                try {
-                    dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
-                    const response = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload),
-                        signal: controller.signal
-                    });
+                    try {
+                        dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
+                        const response = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                            signal: controller.signal
+                        });
 
-                    clearTimeout(timeoutId);
+                        clearTimeout(timeoutId);
 
-                    if (!response.ok) {
-                        const errData = await response.json().catch(() => ({}));
-                        const errMsg = errData.error?.message || `HTTP ${response.status}`;
-                        throw new Error(errMsg);
+                        if (!response.ok) {
+                            const errData = await response.json().catch(() => ({}));
+                            const errMsg = errData.error?.message || `HTTP ${response.status}`;
+                            throw new Error(errMsg);
+                        }
+
+                        const data = await response.json();
+                        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                        dbgLog(`[Gemini 受信テキスト] ${rawText}`);
+
+                        const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
+                        if (jsonMatch) {
+                            const parsed = JSON.parse(jsonMatch[0]);
+                            const validEmotions = ['Happy', 'Anger', 'Surprised', 'Sad', 'Default'];
+                            const emotion = validEmotions.includes(parsed.emotion) ? parsed.emotion : 'Happy';
+                            const text = parsed.text || "うん！分かったよ！";
+                            
+                            dbgLog(`[Gemini 解析成功] 感情:${emotion}, テキスト:"${text}"`);
+                            return { emotion, text };
+                        } else {
+                            dbgLog("[Gemini 警告] JSON構造が見つかりません。直接テキストとして処理します", true);
+                            return { emotion: 'Happy', text: rawText.substring(0, 40) };
+                        }
+
+                    } catch (err) {
+                        clearTimeout(timeoutId);
+
+                        const isAbort = err.name === 'AbortError';
+                        const errorReason = isAbort ? "通信タイムアウト (7秒制限)" : err.message;
+                        dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
+
+                        if (attempt === maxRetries) {
+                            return {
+                                emotion: 'Sad',
+                                text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。"
+                            };
+                        }
+
+                        const delayMs = Math.pow(2, attempt - 1) * 1000;
+                        dbgLog(`[Gemini 自動リトライ] ${delayMs / 1000}秒後に再試行します...`);
+                        await new Promise(resolve => setTimeout(resolve, delayMs));
                     }
-
-                    const data = await response.json();
-                    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-                    dbgLog(`[Gemini 受信テキスト] ${rawText}`);
-
-                    const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
-                    if (jsonMatch) {
-                        const parsed = JSON.parse(jsonMatch[0]);
-                        const validEmotions = ['Happy', 'Anger', 'Surprised', 'Sad', 'Default'];
-                        const emotion = validEmotions.includes(parsed.emotion) ? parsed.emotion : 'Happy';
-                        const text = parsed.text || "うん！分かったよ！";
-                        
-                        dbgLog(`[Gemini 解析成功] 感情:${emotion}, テキスト:"${text}"`);
-                        return { emotion, text };
-                    } else {
-                        dbgLog("[Gemini 警告] JSON構造が見つかりません。直接テキストとして処理します", true);
-                        return { emotion: 'Happy', text: rawText.substring(0, 40) };
-                    }
-
-                } catch (err) {
-                    clearTimeout(timeoutId);
-
-                    const isAbort = err.name === 'AbortError';
-                    const errorReason = isAbort ? "通信タイムアウト (7秒制限)" : err.message;
-                    dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
-
-                    if (attempt === maxRetries) {
-                        return {
-                            emotion: 'Sad',
-                            text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。"
-                        };
-                    }
-
-                    const delayMs = Math.pow(2, attempt - 1) * 1000;
-                    dbgLog(`[Gemini 自動リトライ] ${delayMs / 1000}秒後に再試行します...`);
-                    await new Promise(resolve => setTimeout(resolve, delayMs));
                 }
+            } finally {
+                isApiProcessing = false;
             }
         }
 
@@ -608,7 +666,7 @@ Default: その他通常会話`;
             }
             if (!isSleeping) setEmotion('Default');
             scheduleNextVisionCheck(delay);
-            scheduleNextEnvCheck(45000);
+            scheduleNextEnvCheck(envCheckBackoffDelay);
             dbgLog("[SYSTEM] インタラクション状態をリセットしました");
         }
 
@@ -1156,6 +1214,9 @@ Default: その他通常会話`;
                 isActivated = true;
                 dbgLog("フォルダの権限取得成功");
 
+                // 起動時にScreen Wake Lock（画面常時点灯）を発行
+                await requestWakeLock();
+
                 const overlay = document.getElementById('activateOverlay');
                 const badge = document.getElementById('statusBadge');
                 const chatLog = document.getElementById('chatLog');
@@ -1390,7 +1451,7 @@ Default: その他通常会話`;
         }
 
         async function performFaceRecognitionCheck() {
-            if (isSleeping || isConversing || !isActivated || isWaitingForName || isWaitingForLocationName) return;
+            if (isApiProcessing || isSleeping || isConversing || !isActivated || isWaitingForName || isWaitingForLocationName) return;
 
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
