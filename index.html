@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Pet - PWA & Android Obsidian Export Version</title>
+    <title>AI Pet - Complete Download Vault Export Version</title>
     <link rel="icon" href="data:,">
     <link rel="manifest" href="manifest.json">
     <script id="faceApiScript" src="https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"></script>
@@ -210,8 +210,8 @@
     <div class="main-container">
         <div class="pet-stage" id="petStage" onclick="handleStageClick()">
             <div id="activateOverlay" class="activate-overlay" onclick="event.stopPropagation()">
-                <button class="activate-btn" onclick="triggerActivation()">Vaultフォルダを選択して起動</button>
-                <div class="activate-hint">タップしてAndroidのファイル選択画面からObsidianのVaultフォルダを指定してください。</div>
+                <button class="activate-btn" onclick="triggerActivation()">AI Pet を起動する</button>
+                <div class="activate-hint">Download フォルダ内の Vault へ直接ログを出力します。</div>
             </div>
 
             <div id="statusBadge" class="status-badge">未起動</div>
@@ -230,15 +230,15 @@
         </div>
 
         <div class="log-container">
-            <div id="chatLog" class="chat-log">フォルダを選択して起動してね！</div>
-            <div class="hint-text">📁 ObsidianのVaultフォルダに直接書き込みます</div>
+            <div id="chatLog" class="chat-log">タップして起動してね！</div>
+            <div class="hint-text">📁 Download/Vault 直接書き出しモード</div>
         </div>
     </div>
 
     <div id="controlPanel" class="control-panel">
         <div>
             <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">Gemini API キー:</label>
-            <input type="password" id="geminiApiKey" class="api-key-input" placeholder="AIキーを入力" onchange="saveApiKeyToVault(this.value)">
+            <input type="password" id="geminiApiKey" class="api-key-input" placeholder="AIキーを入力" onchange="saveApiKey(this.value)">
         </div>
 
         <div>
@@ -273,7 +273,6 @@
 
         let IS_AI_MODE = true;
 
-        let vaultDirHandle = null; 
         let knownFaces = []; 
         let knownLocations = []; 
         let currentPresentPersons = new Set(); 
@@ -346,80 +345,46 @@
             return savedKey;
         }
 
-        async function writeMarkdownFile(subDir, fileName, content, append = false) {
-            if (!vaultDirHandle) {
-                dbgLog("[保存失敗] Vaultフォルダが選択されていません", true);
-                return false;
-            }
-
-            try {
-                const options = { mode: 'readwrite' };
-                if ((await vaultDirHandle.queryPermission(options)) !== 'granted') {
-                    if ((await vaultDirHandle.requestPermission(options)) !== 'granted') {
-                        dbgLog("[保存失敗] Vaultへの書き込み権限が拒否されました", true);
-                        return false;
-                    }
-                }
-
-                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
-
-                let fileHandle = null;
-                let existingContent = "";
-
-                if (append) {
-                    try {
-                        fileHandle = await dirHandle.getFileHandle(fileName, { create: false });
-                        const file = await fileHandle.getFile();
-                        existingContent = await file.text();
-                    } catch (e) {
-                        fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-                    }
-                } else {
-                    fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-                }
-
-                const finalContent = append && existingContent ? existingContent + "\n" + content : content;
-                const writable = await fileHandle.createWritable();
-                await writable.write(finalContent);
-                await writable.close();
-
-                dbgLog(`[保存成功] ${subDir}/${fileName}`);
-                return true;
-            } catch (err) {
-                dbgLog(`[保存例外] ${subDir}/${fileName}: ${err.name} - ${err.message}`, true);
-                return false;
-            }
-        }
-
-        async function saveApiKeyToVault(key) {
-            if (!vaultDirHandle || !key) return;
-            await writeMarkdownFile("Settings", "API_KEY.md", key.trim(), false);
+        function saveApiKey(key) {
             localStorage.setItem('gemini_api_key', key.trim());
-            dbgLog("[API KEY] Settings/API_KEY.md へ正常に保存しました");
-            
+            dbgLog("[API KEY] ブラウザ保存完了");
             const inputEl = document.getElementById('geminiApiKey');
             if (inputEl) inputEl.value = key.trim();
         }
 
-        async function loadApiKeyFromVault() {
-            if (!vaultDirHandle) return null;
+        // --- Obsidian Vault (Download フォルダ直接書き出し) ---
+        function writeMarkdownFile(subDir, fileName, content, append = true) {
             try {
-                const settingsDir = await vaultDirHandle.getDirectoryHandle("Settings", { create: false });
-                const fileHandle = await settingsDir.getFileHandle("API_KEY.md", { create: false });
-                const file = await fileHandle.getFile();
-                const text = await file.text();
-                const key = text.trim();
-                if (key) {
-                    localStorage.setItem('gemini_api_key', key);
-                    dbgLog("[API KEY] Settings/API_KEY.md からキーを自動読込しました");
-                    const inputEl = document.getElementById('geminiApiKey');
-                    if (inputEl) inputEl.value = key;
-                    return key;
+                // ローカルストレージ（キャッシュ）の同期保持
+                const cacheKey = `vault_cache_${subDir}_${fileName}`;
+                let existingContent = localStorage.getItem(cacheKey) || '';
+                if (append && existingContent) {
+                    existingContent += "\n" + content;
+                } else {
+                    existingContent = content;
                 }
+                localStorage.setItem(cacheKey, existingContent);
+
+                // Download フォルダへの自動保存発火
+                const blob = new Blob([existingContent], { type: 'text/markdown;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `${subDir}_${fileName}`;
+                
+                document.body.appendChild(link);
+                link.click();
+                
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+
+                dbgLog(`[保存成功] Download/${subDir}_${fileName}`);
+                return true;
             } catch (err) {
-                dbgLog("[API KEY] Vault内に Settings/API_KEY.md は存在しません");
+                dbgLog(`[保存例外] ${subDir}/${fileName}: ${err.message}`, true);
+                return false;
             }
-            return null;
         }
 
         function captureCameraFrame() {
@@ -460,7 +425,7 @@
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
-            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
             const parts = [{ text: systemInstruction }];
 
             if (imageBase64) {
@@ -609,7 +574,7 @@
         }
 
         async function searchRelatedEpisodes(userText) {
-            if (!vaultDirHandle || !userText) return "";
+            if (!userText) return "";
 
             const matchedPersons = knownFaces.map(f => f.name).filter(name => isExactWordMatch(userText, name));
             const matchedLocations = knownLocations.map(l => l.name).filter(name => isExactWordMatch(userText, name));
@@ -623,20 +588,14 @@
             const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
 
             try {
-                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
+                // キャッシュまたはローカルストレージから過去30日分検索
+                for (let i = 0; i < 30; i++) {
+                    const targetDate = new Date(now.getTime() - (i * 24 * 60 * 60 * 1000));
+                    const datePart = targetDate.toISOString().split('T')[0];
+                    const cacheKey = `vault_cache_Episodes_${datePart}.md`;
+                    const text = localStorage.getItem(cacheKey) || '';
 
-                for await (const [name, handle] of dirHandle.entries()) {
-                    if (handle.kind === 'file' && name.endsWith('.md')) {
-                        const datePart = name.replace('.md', '');
-                        const fileDate = new Date(datePart);
-
-                        if (isNaN(fileDate.getTime()) || fileDate < thirtyDaysAgo) {
-                            continue;
-                        }
-
-                        const file = await handle.getFile();
-                        const text = await file.text();
-
+                    if (text) {
                         const targets = [
                             ...matchedPersons.map(p => `[[${p}]]`),
                             ...matchedLocations.map(l => `[[${l}]]`)
@@ -723,7 +682,7 @@ Default: その他通常会話`;
                         if (attempt === maxRetries) {
                             return {
                                 emotion: 'Sad',
-                                text: "ごめんね、通信が混雑していて上手くお返味が考えられなかったよ。"
+                                text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。"
                             };
                         }
 
@@ -736,8 +695,7 @@ Default: その他通常会話`;
                 isApiProcessing = false;
             }
         }
-
-        function resetInteractionState(delay = 8000) {
+function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
             isWaitingForLocationName = false;
             isConversing = false;
@@ -1150,8 +1108,6 @@ Default: その他通常会話`;
         }
 
         async function saveEpisodeToVault(episodeTitle, contentText, locationName, personNames = []) {
-            if (!vaultDirHandle) return;
-
             const now = new Date();
             const dateStr = now.toISOString().split('T')[0];
             const timeStr = now.toTimeString().split(' ')[0];
@@ -1175,52 +1131,28 @@ Default: その他通常会話`;
         }
 
         async function hasGreetedTodayFromVault(personName) {
-            if (!vaultDirHandle) return false;
             const dateStr = new Date().toISOString().split('T')[0];
-            const filename = `${dateStr}.md`;
-
-            try {
-                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
-                const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
-                const file = await fileHandle.getFile();
-                const text = await file.text();
-                return text.includes(`${personName}さん、こんにちは`);
-            } catch (err) {
-                return false;
-            }
+            const cacheKey = `vault_cache_Episodes_${dateStr}.md`;
+            const text = localStorage.getItem(cacheKey) || '';
+            return text.includes(`${personName}さん、こんにちは`);
         }
 
         async function getTodayEpisodeText() {
-            if (!vaultDirHandle) return "";
             const now = new Date();
             const dateStr = now.toISOString().split('T')[0];
-            const filename = `${dateStr}.md`;
-
             let combinedText = "";
 
-            try {
-                const dirHandle = await vaultDirHandle.getDirectoryHandle("Episodes", { create: false });
-                
-                if (now.getHours() < 5) {
-                    const yesterday = new Date(now.getTime() - (24 * 60 * 60 * 1000));
-                    const prevFilename = `${yesterday.toISOString().split('T')[0]}.md`;
-                    try {
-                        const prevHandle = await dirHandle.getFileHandle(prevFilename, { create: false });
-                        const prevFile = await prevHandle.getFile();
-                        combinedText += await prevFile.text() + "\n\n";
-                    } catch (e) {}
-                }
-
-                try {
-                    const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
-                    const file = await fileHandle.getFile();
-                    combinedText += await file.text();
-                } catch (e) {}
-
-                return combinedText;
-            } catch (err) {
-                return "";
+            if (now.getHours() < 5) {
+                const yesterday = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+                const prevDateStr = yesterday.toISOString().split('T')[0];
+                const prevText = localStorage.getItem(`vault_cache_Episodes_${prevDateStr}.md`) || '';
+                combinedText += prevText + "\n\n";
             }
+
+            const todayText = localStorage.getItem(`vault_cache_Episodes_${dateStr}.md`) || '';
+            combinedText += todayText;
+
+            return combinedText;
         }
 
         async function generateTopicFromContext(personName, todayContext) {
@@ -1298,7 +1230,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             const jsonStr = JSON.stringify({ descriptor: descriptorArray });
             const content = `# 人物: ${personName}\n**登録日時**: ${new Date().toLocaleString()}\n\n\`\`\`json\n${jsonStr}\n\`\`\`\n`;
 
-            const isSaved = await writeMarkdownFile("Persons", filename, content, false);
+            await writeMarkdownFile("Persons", filename, content, false);
 
             const exists = knownFaces.some(f => f.name === personName);
             if (!exists) {
@@ -1306,64 +1238,40 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     name: personName,
                     descriptor: descriptor
                 });
+                localStorage.setItem('known_faces', JSON.stringify(knownFaces.map(f => ({
+                    name: f.name,
+                    descriptor: Array.from(f.descriptor)
+                }))));
             }
 
-            if (isSaved) {
-                dbgLog(`[人物登録完了] Persons/${filename} を作成・メモリ追加しました`);
-            } else {
-                dbgLog(`[警告] Persons/${filename} のVault保存に失敗しましたが、メモリ上には登録しました`, true);
+            dbgLog(`[人物登録完了] Persons/${filename} を作成・保存しました`);
+        }
+
+        function loadKnownFacesFromCache() {
+            try {
+                const saved = localStorage.getItem('known_faces');
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    knownFaces = parsed.map(f => ({
+                        name: f.name,
+                        descriptor: new Float32Array(f.descriptor)
+                    }));
+                    dbgLog(`[記憶復元] 顔データ ${knownFaces.length}件を読み込みました`);
+                }
+            } catch (e) {
+                dbgLog(`[顔記憶復元エラー] ${e.message}`, true);
             }
         }
 
-        async function loadKnownFacesFromVault() {
-            if (!vaultDirHandle) return;
-            knownFaces = [];
+        function loadKnownLocationsFromCache() {
             try {
-                const personsDir = await vaultDirHandle.getDirectoryHandle("Persons", { create: true });
-                for await (const [name, handle] of personsDir.entries()) {
-                    if (handle.kind === 'file' && name.endsWith('.md')) {
-                        const file = await handle.getFile();
-                        const text = await file.text();
-                        const match = text.match(/```json\s*([\s\S]*?)\s*```/);
-                        if (match) {
-                            const data = JSON.parse(match[1]);
-                            if (data.descriptor) {
-                                knownFaces.push({
-                                    name: name.replace('.md', ''),
-                                    descriptor: new Float32Array(data.descriptor)
-                                });
-                            }
-                        }
-                    }
+                const saved = localStorage.getItem('known_locations');
+                if (saved) {
+                    knownLocations = JSON.parse(saved);
+                    dbgLog(`[記憶復元] 場所データ ${knownLocations.length}件を読み込みました`);
                 }
-                dbgLog(`顔データ復元: ${knownFaces.length}人`);
-            } catch (err) {
-                dbgLog("Persons読み込み完了");
-            }
-        }
-
-        async function loadKnownLocationsFromVault() {
-            if (!vaultDirHandle) return;
-            knownLocations = [];
-            try {
-                const locationsDir = await vaultDirHandle.getDirectoryHandle("Locations", { create: true });
-                for await (const [name, handle] of locationsDir.entries()) {
-                    if (handle.kind === 'file' && name.endsWith('.md')) {
-                        const file = await handle.getFile();
-                        const text = await file.text();
-                        const match = text.match(/\*\*緯度・経度\*\*:\s*([0-9.-]+),\s*([0-9.-]+)/);
-                        if (match) {
-                            knownLocations.push({
-                                name: name.replace('.md', ''),
-                                lat: parseFloat(match[1]),
-                                lon: parseFloat(match[2])
-                            });
-                        }
-                    }
-                }
-                dbgLog(`場所データ復元: ${knownLocations.length}件`);
-            } catch (err) {
-                dbgLog("Locations読み込み完了");
+            } catch (e) {
+                dbgLog(`[場所記憶復元エラー] ${e.message}`, true);
             }
         }
 
@@ -1440,6 +1348,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     lat: coords.lat,
                     lon: coords.lon
                 });
+                localStorage.setItem('known_locations', JSON.stringify(knownLocations));
             }
             currentKnownLocationName = locationName;
         }
@@ -1456,53 +1365,38 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
         async function triggerActivation() {
             if (isActivated) return;
+            isActivated = true;
 
-            if (!window.showDirectoryPicker) {
-                alert("お使いのブラウザ・環境では showDirectoryPicker に非対応です（HTTPS接続で動作させているか確認してください）。");
-                return;
+            const overlay = document.getElementById('activateOverlay');
+            const badge = document.getElementById('statusBadge');
+            const chatLog = document.getElementById('chatLog');
+
+            overlay.style.opacity = '0';
+            setTimeout(() => { overlay.style.display = 'none'; }, 300);
+
+            badge.innerText = "初期化中...";
+
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const dummy = new SpeechSynthesisUtterance("");
+                window.speechSynthesis.speak(dummy);
             }
 
+            await requestWakeLock();
+
+            badge.innerText = "マイク確認中";
+            dbgLog("マイク（音声入力）の権限を要求中...");
             try {
-                dbgLog("フォルダ選択処理を開始...");
-                vaultDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+                const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioStream.getTracks().forEach(track => track.stop());
+                dbgLog("マイクのパーミッション取得成功");
+            } catch (micErr) {
+                dbgLog(`[マイク警告] ${micErr.message}`, true);
+            }
 
-                const permStatus = await vaultDirHandle.requestPermission({ mode: 'readwrite' });
-                if (permStatus !== 'granted') {
-                    throw new Error("Vaultフォルダへの書き込み権限が許可されませんでした。");
-                }
-
-                isActivated = true;
-                dbgLog("フォルダの書き込み権限取得に成功しました");
-
-                await requestWakeLock();
-
-                const overlay = document.getElementById('activateOverlay');
-                const badge = document.getElementById('statusBadge');
-                const chatLog = document.getElementById('chatLog');
-
-                overlay.style.opacity = '0';
-                setTimeout(() => { overlay.style.display = 'none'; }, 300);
-
-                badge.innerText = "初期化中...";
-
-                if ('speechSynthesis' in window) {
-                    window.speechSynthesis.cancel();
-                    const dummy = new SpeechSynthesisUtterance("");
-                    window.speechSynthesis.speak(dummy);
-                }
-
-                badge.innerText = "マイク確認中";
-                dbgLog("マイク（音声入力）の権限を要求中...");
-                try {
-                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    audioStream.getTracks().forEach(track => track.stop());
-                    dbgLog("マイクのパーミッション取得成功");
-                } catch (micErr) {
-                    dbgLog(`[マイク警告] ${micErr.message}`, true);
-                }
-
-                badge.innerText = "カメラ起動中";
-                dbgLog("カメラへのアクセスを要求中...");
+            badge.innerText = "カメラ起動中";
+            dbgLog("カメラへのアクセスを要求中...");
+            try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } 
                 });
@@ -1525,34 +1419,38 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         resolve();
                     }
                 });
+            } catch (camErr) {
+                dbgLog(`[カメラ起動エラー] ${camErr.message}`, true);
+            }
 
-                badge.innerText = "ライブラリ確認中";
-                dbgLog("faceapi のロード状態を確認中...");
+            badge.innerText = "ライブラリ確認中";
+            dbgLog("faceapi のロード状態を確認中...");
 
-                let waitCount = 0;
-                while ((typeof faceapi === 'undefined' || !faceapi.nets) && waitCount < 6) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    waitCount++;
+            let waitCount = 0;
+            while ((typeof faceapi === 'undefined' || !faceapi.nets) && waitCount < 6) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                waitCount++;
+            }
+
+            if (typeof faceapi === 'undefined' || !faceapi.nets) {
+                dbgLog("[警告] 主力CDNからの読込失敗を検出。予備CDNから再読み込みします...", true);
+                try {
+                    await loadScriptAsync('https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js');
+                    dbgLog("予備CDNからのスクリプト読み込みに成功しました");
+                } catch (backupErr) {
+                    dbgLog("[エラー] 予備CDNからの読み込みにも失敗しました", true);
                 }
+            }
 
-                if (typeof faceapi === 'undefined' || !faceapi.nets) {
-                    dbgLog("[警告] 主力CDNからの読込失敗を検出。予備CDNから再読み込みします...", true);
-                    try {
-                        await loadScriptAsync('https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js');
-                        dbgLog("予備CDNからのスクリプト読み込みに成功しました");
-                    } catch (backupErr) {
-                        dbgLog("[エラー] 予備CDNからの読み込みにも失敗しました", true);
-                    }
-                }
+            if (typeof faceapi === 'undefined' || !faceapi.nets) {
+                alert("face-api.js の読み込みに失敗しました。ネット接続状況を確認してください。");
+            }
 
-                if (typeof faceapi === 'undefined' || !faceapi.nets) {
-                    throw new Error("face-api.js の読み込みに失敗しました。ネット接続状況を確認してください。");
-                }
-
-                badge.innerText = "モデル読込中";
-                const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
-                dbgLog(`モデルをロード開始: ${MODEL_URL}`);
-                
+            badge.innerText = "モデル読込中";
+            const MODEL_URL = 'https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/models';
+            dbgLog(`モデルをロード開始: ${MODEL_URL}`);
+            
+            try {
                 if (faceapi.nets.tinyFaceDetector) {
                     await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                     dbgLog("tinyFaceDetector ロード完了");
@@ -1567,52 +1465,43 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 if (recNet) {
                     await recNet.loadFromUri(MODEL_URL);
                     dbgLog("顔認識モデル ロード完了");
-                } else {
-                    dbgLog("警告: 顔認識モデルのプロパティが見つかりません", true);
                 }
-
-                const testSuccess = await writeMarkdownFile("Settings", "INIT_TEST.md", `起動確認: ${new Date().toLocaleString()}`, false);
-                if (!testSuccess) {
-                    dbgLog("[警告] テストファイルの書き込みに失敗しました。ストレージ制限の可能性があります", true);
-                }
-
-                badge.innerText = "記憶を復元中";
-                await loadKnownFacesFromVault();
-                await loadKnownLocationsFromVault();
-
-                badge.innerText = "APIキー確認中";
-                let apiKey = await loadApiKeyFromVault();
-                if (!apiKey) {
-                    const inputKey = prompt("Gemini APIキーが見つかりませんでした。\nAPIキーを入力してください（Settings/API_KEY.md に自動設置されます）:");
-                    if (inputKey && inputKey.trim() !== "") {
-                        await saveApiKeyToVault(inputKey.trim());
-                    } else {
-                        dbgLog("[API KEY] キーの入力がキャンセルされたため、未設定で起動します");
-                    }
-                }
-
-                badge.innerText = "位置情報確認";
-                const locResult = await checkOrAskLocation();
-
-                initVoices();
-
-                badge.innerText = "待機モード";
-                const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
-                chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
-                setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
-                
-                startIdleAnimations();
-
-                speak(welcomeMsg, () => {
-                    setEmotion('Default');
-                    scheduleNextVisionCheck(2000);
-                    scheduleNextEnvCheck(15000);
-                });
-
             } catch (err) {
-                dbgLog(`[エラー例外捕捉] ${err.name}: ${err.message}`, true);
-                alert("起動エラー: " + err.message);
+                dbgLog(`[モデルロード注意] ${err.message}`);
             }
+
+            badge.innerText = "記憶を復元中";
+            loadKnownFacesFromCache();
+            loadKnownLocationsFromCache();
+
+            badge.innerText = "APIキー確認中";
+            let apiKey = loadApiKey();
+            if (!apiKey) {
+                const inputKey = prompt("Gemini APIキーを入力してください:");
+                if (inputKey && inputKey.trim() !== "") {
+                    saveApiKey(inputKey.trim());
+                }
+            }
+
+            badge.innerText = "位置情報確認";
+            const locResult = await checkOrAskLocation();
+
+            initVoices();
+
+            badge.innerText = "待機モード";
+            const welcomeMsg = `起動完了！Download フォルダ書き出しモードで起動したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
+            chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
+            setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
+            
+            startIdleAnimations();
+
+            writeMarkdownFile("Settings", "INIT_TEST.md", `# 起動確認\n日時: ${new Date().toLocaleString()}`, false);
+
+            speak(welcomeMsg, () => {
+                setEmotion('Default');
+                scheduleNextVisionCheck(2000);
+                scheduleNextEnvCheck(15000);
+            });
         }
 
         function updateIndicators() {
