@@ -1408,25 +1408,31 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         }
 
         async function getCurrentLocation() {
-            if (!navigator.geolocation) return { lat: null, lon: null };
+            if (!navigator.geolocation) {
+                dbgLog("[位置情報エラー] ブラウザが Geolocation API に非対応です", true);
+                return { lat: null, lon: null };
+            }
 
             return new Promise((resolve) => {
+                dbgLog("[位置情報] GPS座標を取得中...");
                 navigator.geolocation.getCurrentPosition(
                     (position) => {
-                        dbgLog(`[位置情報取得成功] lat: ${position.coords.latitude}, lon: ${position.coords.longitude}`);
-                        resolve({
+                        const coords = {
                             lat: position.coords.latitude,
                             lon: position.coords.longitude
-                        });
+                        };
+                        dbgLog(`[位置情報取得成功] lat: ${coords.lat}, lon: ${coords.lon}`);
+                        resolve(coords);
                     },
                     (error) => {
-                        dbgLog(`[位置情報取得エラー] ${error.message}`, true);
+                        // 1: PERMISSION_DENIED, 2: POSITION_UNAVAILABLE, 3: TIMEOUT
+                        dbgLog(`[位置情報取得失敗] コード:${error.code}, 詳細:${error.message}`, true);
                         resolve({ lat: null, lon: null });
                     },
                     { 
-                        enableHighAccuracy: true, // 高精度GPSを使用
-                        timeout: 15000,           // スマホ用にタイムアウトを15秒へ延長
-                        maximumAge: 30000         // 30秒以内のキャッシュ利用を許可
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
                     }
                 );
             });
@@ -1435,10 +1441,17 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         async function checkOrAskLocation() {
             const coords = await getCurrentLocation();
             
-            if (!coords.lat || !coords.lon) {
+            // 座標が確実に数値として存在するか判定
+            if (coords.lat === null || coords.lon === null || isNaN(coords.lat) || isNaN(coords.lon)) {
                 currentKnownLocationName = "お出かけ先";
+                pendingLocationCoords = null;
+                dbgLog("[位置情報判定] 座標が取得できなかったため『お出かけ先』として扱います");
                 return { isKnown: true, name: currentKnownLocationName, message: "現在地が取得できなかったよ。" };
             }
+
+            // 取得成功時は pendingLocationCoords に確実に保存
+            pendingLocationCoords = coords;
+            dbgLog(`[位置情報判定] 座標保持: ${coords.lat}, ${coords.lon}`);
 
             const THRESHOLD_METERS = 80;
             const matched = knownLocations.find(loc => {
@@ -1454,7 +1467,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     message: `ここは前に来たことがある「${matched.name}」だね！`
                 };
             } else {
-                pendingLocationCoords = coords;
                 isWaitingForLocationName = true;
                 isConversing = true;
                 return {
