@@ -347,17 +347,25 @@
         }
 
         async function writeMarkdownFile(subDir, fileName, content, append = false) {
-            if (!vaultDirHandle) return;
+            if (!vaultDirHandle) {
+                dbgLog("[保存失敗] Vaultフォルダが選択されていません", true);
+                return false;
+            }
+
             try {
-                // サブフォルダの取得、なければ作成
-                let dirHandle;
-                try {
-                    dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
-                } catch (dirErr) {
-                    dbgLog(`[フォルダ作成失敗] ${subDir}: ${dirErr.message}`, true);
-                    throw dirErr;
+                // 1. 書き込み権限の最終確認
+                const options = { mode: 'readwrite' };
+                if ((await vaultDirHandle.queryPermission(options)) !== 'granted') {
+                    if ((await vaultDirHandle.requestPermission(options)) !== 'granted') {
+                        dbgLog("[保存失敗] Vaultへの書き込み権限が拒否されました", true);
+                        return false;
+                    }
                 }
 
+                // 2. サブフォルダの取得または作成
+                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
+
+                // 3. ファイルの取得または作成
                 let fileHandle = null;
                 let existingContent = "";
 
@@ -373,17 +381,20 @@
                     fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
                 }
 
+                // 4. 書き込み実行
                 const finalContent = append && existingContent ? existingContent + "\n" + content : content;
                 const writable = await fileHandle.createWritable();
                 await writable.write(finalContent);
                 await writable.close();
+
                 dbgLog(`[保存成功] ${subDir}/${fileName}`);
                 return true;
             } catch (err) {
-                dbgLog(`[保存失敗] ${subDir}/${fileName}: ${err.message}`, true);
+                dbgLog(`[保存例外] ${subDir}/${fileName}: ${err.name} - ${err.message}`, true);
                 return false;
             }
         }
+
         async function saveApiKeyToVault(key) {
             if (!vaultDirHandle || !key) return;
             await writeMarkdownFile("Settings", "API_KEY.md", key.trim(), false);
@@ -1449,158 +1460,29 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             });
         }
 
-        async function triggerActivation() {
-            if (isActivated) return;
+// triggerActivation 内の フォルダ選択処理部分
+try {
+    dbgLog("フォルダ選択処理を開始...");
+    vaultDirHandle = await window.showDirectoryPicker({
+        mode: 'readwrite' // 最初から読み書きモードを指定
+    });
 
-            if (!window.showDirectoryPicker) {
-                alert("showDirectoryPicker 非対応です");
-                return;
-            }
+    // 明示的に書き込み権限を確認・ダイアログ要求
+    const permStatus = await vaultDirHandle.requestPermission({ mode: 'readwrite' });
+    if (permStatus !== 'granted') {
+        throw new Error("Vaultフォルダへの書き込み権限が許可されませんでした。");
+    }
 
-            try {
-                dbgLog("フォルダ選択処理を開始...");
-                vaultDirHandle = await window.showDirectoryPicker();
-                isActivated = true;
-                dbgLog("フォルダの権限取得成功");
+    isActivated = true;
+    dbgLog("フォルダの書き込み権限取得に成功しました");
 
-                await requestWakeLock();
-
-                const overlay = document.getElementById('activateOverlay');
-                const badge = document.getElementById('statusBadge');
-                const chatLog = document.getElementById('chatLog');
-
-                overlay.style.opacity = '0';
-                setTimeout(() => { overlay.style.display = 'none'; }, 300);
-
-                badge.innerText = "初期化中...";
-
-                if ('speechSynthesis' in window) {
-                    window.speechSynthesis.cancel();
-                    const dummy = new SpeechSynthesisUtterance("");
-                    window.speechSynthesis.speak(dummy);
-                }
-
-                badge.innerText = "マイク確認中";
-                dbgLog("マイク（音声入力）の権限を要求中...");
-                try {
-                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    audioStream.getTracks().forEach(track => track.stop());
-                    dbgLog("マイクのパーミッション取得成功");
-                } catch (micErr) {
-                    dbgLog(`[マイク警告] ${micErr.message}`, true);
-                }
-
-                badge.innerText = "カメラ起動中";
-                dbgLog("カメラへのアクセスを要求中...");
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } 
-                });
-                
-                const videoEl = document.getElementById('cameraStream');
-                videoEl.srcObject = stream;
-                
-                await new Promise((resolve) => {
-                    videoEl.onloadedmetadata = () => {
-                        videoEl.play().then(() => {
-                            dbgLog("カメラストリーム再生開始成功");
-                            resolve();
-                        }).catch(e => {
-                            dbgLog(`[カメラ再生例外] ${e.message}`, true);
-                            resolve();
-                        });
-                    };
-                    if (videoEl.readyState >= 2) {
-                        videoEl.play().catch(() => {});
-                        resolve();
-                    }
-                });
-
-                badge.innerText = "ライブラリ確認中";
-                dbgLog("faceapi のロード状態を確認中...");
-
-                // 1. まずグローバルスコープへのロードをチェック
-                let waitCount = 0;
-                while ((typeof faceapi === 'undefined' || !faceapi.nets) && waitCount < 6) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    waitCount++;
-                }
-
-                // 2. それでも読み込まれていなければ別CDNから動的読み込みを試行
-                if (typeof faceapi === 'undefined' || !faceapi.nets) {
-                    dbgLog("[警告] 主力CDNからの読込失敗を検出。予備CDN (cdn.jsdelivr.net) から再読み込みします...", true);
-                    try {
-                        await loadScriptAsync('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js');
-                        dbgLog("予備CDNからのスクリプト読み込みに成功しました");
-                    } catch (backupErr) {
-                        dbgLog("[エラー] 予備CDNからの読み込みにも失敗しました", true);
-                    }
-                }
-
-                if (typeof faceapi === 'undefined' || !faceapi.nets) {
-                    throw new Error("face-api.js の読み込みに失敗しました。インターネット接続状況を確認してください。");
-                }
-
-                badge.innerText = "モデル読込中";
-                const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
-                dbgLog(`モデルをロード開始: ${MODEL_URL}`);
-                
-                if (faceapi.nets.tinyFaceDetector) {
-                    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                    dbgLog("tinyFaceDetector ロード完了");
-                }
-
-                if (faceapi.nets.faceLandmark68Net) {
-                    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-                    dbgLog("faceLandmark68Net ロード完了");
-                }
-
-                const recNet = faceapi.nets.faceRecognitionNet || faceapi.nets.recognitionNet;
-                if (recNet) {
-                    await recNet.loadFromUri(MODEL_URL);
-                    dbgLog("顔認識モデル ロード完了");
-                } else {
-                    dbgLog("警告: 顔認識モデルのプロパティが見つかりません", true);
-                }
-
-                badge.innerText = "記憶を復元中";
-                await loadKnownFacesFromVault();
-                await loadKnownLocationsFromVault();
-
-                badge.innerText = "APIキー確認中";
-                let apiKey = await loadApiKeyFromVault();
-                if (!apiKey) {
-                    const inputKey = prompt("Gemini APIキーが見つかりませんでした。\nAPIキーを入力してください（Settings/API_KEY.md に自動設置されます）:");
-                    if (inputKey && inputKey.trim() !== "") {
-                        await saveApiKeyToVault(inputKey.trim());
-                    } else {
-                        dbgLog("[API KEY] キーの入力がキャンセルされたため、未設定で起動します");
-                    }
-                }
-
-                badge.innerText = "位置情報確認";
-                const locResult = await checkOrAskLocation();
-
-                initVoices();
-
-                badge.innerText = "待機モード";
-                const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
-                chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
-                setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
-                
-                startIdleAnimations();
-
-                speak(welcomeMsg, () => {
-                    setEmotion('Default');
-                    scheduleNextVisionCheck(2000);
-                    scheduleNextEnvCheck(15000);
-                });
-
-            } catch (err) {
-                dbgLog(`[エラー例外捕捉] ${err.name}: ${err.message}`, true);
-                alert("起動エラー: " + err.message);
-            }
-        }
-
+    // テストファイルの書き込み検証（起動確認用）
+    const testSuccess = await writeMarkdownFile("Settings", "INIT_TEST.md", `起動確認: ${new Date().toLocaleString()}`, false);
+    if (!testSuccess) {
+        dbgLog("[警告] テストファイルの書き込みに失敗しました。Androidのストレージ制限の可能性があります", true);
+    }
+    
+    // （以下、既存のWakeLockやカメラ起動処理へ続く...）
         function updateIndicators() {
             const indSquare = document.getElementById('indSquare');
             if (!indSquare) return;
