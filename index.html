@@ -1549,7 +1549,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 }
 
                 badge.innerText = "モデル読込中";
-                const MODEL_URL = 'https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/models';
+                const MODEL_URL = './models';
                 dbgLog(`モデルをロード開始: ${MODEL_URL}`);
                 
                 if (faceapi.nets.tinyFaceDetector) {
