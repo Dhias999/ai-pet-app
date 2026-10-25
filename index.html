@@ -865,10 +865,15 @@ function resetInteractionState(delay = 8000) {
 
                 if (isWaitingForLocationName) {
                     isWaitingForLocationName = false;
+                    // ★ 修正: 位置情報座標を安全に確保
+                    const savedCoords = pendingLocationCoords;
+                    pendingLocationCoords = null;
+
                     const locationName = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
 
                     speak(`「${locationName}」だね。覚えたよ！`, async () => {
-                        await saveLocationToVault(locationName, pendingLocationCoords);
+                        // ★ 修正: 保存処理へ確保した savedCoords を渡す
+                        await saveLocationToVault(locationName, savedCoords);
                         
                         const presentPersonsArray = Array.from(currentPresentPersons);
                         const personText = presentPersonsArray.length > 0 
@@ -975,13 +980,19 @@ function resetInteractionState(delay = 8000) {
         let recognitionInstance = null;
 
         function startListening() {
-            if (isListening || isSleeping) return;
+            // ★ 強力な排他ガード: 発話中、すでに認識中、スリープ中、またはAPI処理中は絶対に起動しない
+            if (isListening || isSpeaking || isSleeping || isApiProcessing) {
+                dbgLog(`[音声認識起動スキップ] 状態競合を検知 (Listening:${isListening}, Speaking:${isSpeaking}, Sleeping:${isSleeping}, API:${isApiProcessing})`);
+                return;
+            }
 
             try {
                 isConversing = true;
 
+                // 既存の認識インスタンスが存在する場合は完全にクリア
                 if (recognitionInstance) {
                     try { 
+                        recognitionInstance.onstart = null;
                         recognitionInstance.onend = null;
                         recognitionInstance.onerror = null;
                         recognitionInstance.abort(); 
@@ -991,9 +1002,14 @@ function resetInteractionState(delay = 8000) {
 
                 recognitionInstance = createRecognitionInstance();
                 if (recognitionInstance) {
+                    // ★ 起動直前にフラグをオンにして重複実行を防止
+                    isListening = true;
+                    updateIndicators();
                     recognitionInstance.start();
                 }
             } catch (err) {
+                isListening = false;
+                updateIndicators();
                 dbgLog(`[音声認識起動例外] ${err.message}`, true);
                 resetInteractionState(3000);
             }
@@ -1395,14 +1411,24 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             if (!navigator.geolocation) return { lat: null, lon: null };
 
             return new Promise((resolve) => {
-                navigator.geolocation.getCurrentPosition((position) => {
-                    resolve({
-                        lat: position.coords.latitude,
-                        lon: position.coords.longitude
-                    });
-                }, (error) => {
-                    resolve({ lat: null, lon: null });
-                }, { timeout: 5000 });
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        dbgLog(`[位置情報取得成功] lat: ${position.coords.latitude}, lon: ${position.coords.longitude}`);
+                        resolve({
+                            lat: position.coords.latitude,
+                            lon: position.coords.longitude
+                        });
+                    },
+                    (error) => {
+                        dbgLog(`[位置情報取得エラー] ${error.message}`, true);
+                        resolve({ lat: null, lon: null });
+                    },
+                    { 
+                        enableHighAccuracy: true, // 高精度GPSを使用
+                        timeout: 15000,           // スマホ用にタイムアウトを15秒へ延長
+                        maximumAge: 30000         // 30秒以内のキャッシュ利用を許可
+                    }
+                );
             });
         }
 
@@ -1696,6 +1722,17 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         function speak(text, callback) {
             dbgLog(`[発話] ${text}`);
             lastPetSpeech = text; 
+
+            // ★ 排他制御: 発話開始時に音声認識を強制終了してマイクを閉じる
+            if (recognitionInstance) {
+                try {
+                    recognitionInstance.onend = null;
+                    recognitionInstance.abort();
+                } catch(e) {}
+                recognitionInstance = null;
+            }
+            isListening = false;
+            updateIndicators();
 
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
