@@ -6,7 +6,7 @@
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
     <link rel="manifest" href="manifest.json">
-    <script defer src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
+    <script id="faceApiScript" src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
     <style>
         body {
             margin: 0;
@@ -480,7 +480,6 @@
                 const data = await response.json();
                 let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
                 
-                // Geminiが ```json 形式のマークダウンで返した場合の自動除去処理
                 return rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
             } catch (err) {
@@ -932,7 +931,6 @@ Default: その他通常会話`;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
 
-                // 無音検知時の確実なリトライ制御およびループストッパー
                 if (isConversing && !hasUserRespondedInTurn && !hasRetriedSilence && !isSleeping) {
                     hasRetriedSilence = true;
                     dbgLog("[音声認識] 発話未検知による無音終了。1秒後に1回だけ自動リトライします...");
@@ -1417,6 +1415,17 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             currentKnownLocationName = locationName;
         }
 
+        // 動的なスクリプト読み込み関数（バックアップCDN用）
+        function loadScriptAsync(src) {
+            return new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = resolve;
+                s.onerror = reject;
+                document.head.appendChild(s);
+            });
+        }
+
         async function triggerActivation() {
             if (isActivated) return;
 
@@ -1486,19 +1495,30 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 badge.innerText = "ライブラリ確認中";
                 dbgLog("faceapi のロード状態を確認中...");
 
-                // faceapiロード待機ループ (最大5秒間)
+                // 1. まずグローバルスコープへのロードをチェック
                 let waitCount = 0;
-                while ((typeof faceapi === 'undefined' || !faceapi.nets) && waitCount < 10) {
+                while ((typeof faceapi === 'undefined' || !faceapi.nets) && waitCount < 6) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                     waitCount++;
                 }
 
+                // 2. それでも読み込まれていなければ別CDNから動的読み込みを試行
                 if (typeof faceapi === 'undefined' || !faceapi.nets) {
-                    throw new Error("face-api.js の読み込みに失敗しました。ネット接続を確認するか、ページを再読み込みしてください。");
+                    dbgLog("[警告] 主力CDNからの読込失敗を検出。予備CDN (cdn.jsdelivr.net) から再読み込みします...", true);
+                    try {
+                        await loadScriptAsync('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js');
+                        dbgLog("予備CDNからのスクリプト読み込みに成功しました");
+                    } catch (backupErr) {
+                        dbgLog("[エラー] 予備CDNからの読み込みにも失敗しました", true);
+                    }
+                }
+
+                if (typeof faceapi === 'undefined' || !faceapi.nets) {
+                    throw new Error("face-api.js の読み込みに失敗しました。インターネット接続状況を確認してください。");
                 }
 
                 badge.innerText = "モデル読込中";
-                const MODEL_URL = '[https://unpkg.com/@vladmandic/face-api@1.7.15/model/](https://unpkg.com/@vladmandic/face-api@1.7.15/model/)';
+                const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
                 dbgLog(`モデルをロード開始: ${MODEL_URL}`);
                 
                 if (faceapi.nets.tinyFaceDetector) {
