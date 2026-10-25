@@ -6,7 +6,7 @@
     <title>AI Pet - PWA & Android Obsidian Export Version</title>
     <link rel="icon" href="data:,">
     <link rel="manifest" href="manifest.json">
-    <script src="[https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js](https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js)"></script>
+    <script defer src="https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
     <style>
         body {
             margin: 0;
@@ -215,7 +215,7 @@
             </div>
 
             <div id="statusBadge" class="status-badge">未起動</div>
-            <svg viewBox="0 0 600 600" fill="none" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)">
+            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <rect width="600" height="600" fill="none"/>
                 <g id="faceGroup" class="anim-gaze" style="transform-origin: 300px 300px;">
                     <g id="leftEyeGroup" class="anim-emotion" style="transform-origin: 175px 237px;">
@@ -444,7 +444,7 @@
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
-            const endpoint = `[https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$){apiKey}`;
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
             const parts = [{ text: systemInstruction }];
 
             if (imageBase64) {
@@ -1483,14 +1483,22 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     }
                 });
 
-                badge.innerText = "モデル読込中";
-                dbgLog("faceapi の構造を検証中...");
+                badge.innerText = "ライブラリ確認中";
+                dbgLog("faceapi のロード状態を確認中...");
 
-                if (typeof faceapi === 'undefined' || !faceapi.nets) {
-                    throw new Error("faceapiまたはnetsが未ロードです");
+                // faceapiロード待機ループ (最大5秒間)
+                let waitCount = 0;
+                while ((typeof faceapi === 'undefined' || !faceapi.nets) && waitCount < 10) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    waitCount++;
                 }
 
-                const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.7.15/model/';
+                if (typeof faceapi === 'undefined' || !faceapi.nets) {
+                    throw new Error("face-api.js の読み込みに失敗しました。ネット接続を確認するか、ページを再読み込みしてください。");
+                }
+
+                badge.innerText = "モデル読込中";
+                const MODEL_URL = '[https://unpkg.com/@vladmandic/face-api@1.7.15/model/](https://unpkg.com/@vladmandic/face-api@1.7.15/model/)';
                 dbgLog(`モデルをロード開始: ${MODEL_URL}`);
                 
                 if (faceapi.nets.tinyFaceDetector) {
