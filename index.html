@@ -1413,8 +1413,17 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 return { lat: null, lon: null };
             }
 
-            return new Promise((resolve) => {
-                dbgLog("[位置情報] GPS座標を取得中...");
+            dbgLog("[位置情報] GPS座標を取得中...");
+
+            // 独自の10秒タイムアウトPromiseを作成してハングを防止
+            const timeoutPromise = new Promise((resolve) => {
+                setTimeout(() => {
+                    dbgLog("[位置情報警告] 位置情報取得が独自タイムアウト(10秒)しました", true);
+                    resolve({ lat: null, lon: null });
+                }, 10000);
+            });
+
+            const geoPromise = new Promise((resolve) => {
                 navigator.geolocation.getCurrentPosition(
                     (position) => {
                         const coords = {
@@ -1425,17 +1434,19 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         resolve(coords);
                     },
                     (error) => {
-                        // 1: PERMISSION_DENIED, 2: POSITION_UNAVAILABLE, 3: TIMEOUT
                         dbgLog(`[位置情報取得失敗] コード:${error.code}, 詳細:${error.message}`, true);
                         resolve({ lat: null, lon: null });
                     },
                     { 
-                        enableHighAccuracy: true,
-                        timeout: 10000,
-                        maximumAge: 0
+                        enableHighAccuracy: false, // ハング回避のため一旦高精度をOFFにしWi-Fi/基地局測位を優先
+                        timeout: 8000,
+                        maximumAge: 60000
                     }
                 );
             });
+
+            // どちらか早い方を採用
+            return await Promise.race([geoPromise, timeoutPromise]);
         }
 
         async function checkOrAskLocation() {
