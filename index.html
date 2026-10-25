@@ -828,9 +828,9 @@ function resetInteractionState(delay = 8000) {
                 if (isWaitingForName) {
                     isWaitingForName = false;
                     const savedDescriptor = pendingFaceDescriptor;
-                    pendingFaceDescriptor = null;
+                    pendingFaceDescriptor = null; // 二重処理防止のため即クリア
+                    
                     const transcriptClean = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
-
                     const denyKeywords = ['違う', 'ううん', 'いや', 'いいえ', 'やめる', 'キャンセル', 'ちがう'];
                     const isDenied = denyKeywords.some(keyword => transcriptClean.includes(keyword));
 
@@ -846,10 +846,15 @@ function resetInteractionState(delay = 8000) {
                     const hasSuffix = suffixes.some(suffix => personName.endsWith(suffix));
                     const speakName = hasSuffix ? personName : `${personName}さん`;
 
-                    speak(`「${speakName}」だね。覚えたよ！`, async () => {
-                        await savePersonToVault(personName, savedDescriptor);
+                    // ★ 修正点: speak の完了を待たずに即時 Vault への保存処理を開始する
+                    savePersonToVault(personName, savedDescriptor).then(() => {
                         currentPresentPersons.add(personName);
                         personSeenTimestamps.set(personName, Date.now());
+                    }).catch(err => {
+                        dbgLog(`[人物保存例外] ${err.message}`, true);
+                    });
+
+                    speak(`「${speakName}」だね。覚えたよ！`, () => {
                         setEmotion('Happy');
                         setTimeout(() => {
                             resetInteractionState(15000);
@@ -1848,8 +1853,14 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 } else {
                     isConversing = true;
                     setEmotion('Surprised');
-                    // Array.from で即座に配列化して確実に保持する
-                    pendingFaceDescriptor = Array.from(currentDescriptor);
+                    // 特徴量の有無と要素数を厳格にチェック＆ログ出力
+                    if (currentDescriptor && currentDescriptor.length > 0) {
+                        pendingFaceDescriptor = Array.from(currentDescriptor);
+                        dbgLog(`[顔認識成功] 未知の顔を検出。特徴量データセット完了 (要素数: ${pendingFaceDescriptor.length})`);
+                    } else {
+                        pendingFaceDescriptor = null;
+                        dbgLog("[顔認識エラー] 顔の枠は検出されましたが、特徴量(descriptor)の抽出に失敗しました", true);
+                    }
                     isWaitingForName = true;
 
                     if (safetyTimeout) clearTimeout(safetyTimeout);
