@@ -1294,6 +1294,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             }
 
             const filename = `${personName}.md`;
+            // TypedArray/Float32Array または 通常配列 の両方に対応して純粋なArrayへ変換
             const descriptorArray = Array.from(descriptor);
             
             const jsonStr = JSON.stringify({ descriptor: descriptorArray });
@@ -1301,11 +1302,15 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             const isSaved = await writeMarkdownFile("Persons", filename, content, false);
 
-            const exists = knownFaces.some(f => f.name === personName);
-            if (!exists) {
+            // メモリへの登録・更新 (Float32Arrayに復元して格納)
+            const float32Descriptor = new Float32Array(descriptorArray);
+            const existingIndex = knownFaces.findIndex(f => f.name === personName);
+            if (existingIndex >= 0) {
+                knownFaces[existingIndex].descriptor = float32Descriptor;
+            } else {
                 knownFaces.push({
                     name: personName,
-                    descriptor: descriptor
+                    descriptor: float32Descriptor
                 });
             }
 
@@ -1841,7 +1846,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 } else {
                     isConversing = true;
                     setEmotion('Surprised');
-                    pendingFaceDescriptor = currentDescriptor;
+                    // Array.from で即座に配列化して確実に保持する
+                    pendingFaceDescriptor = Array.from(currentDescriptor);
                     isWaitingForName = true;
 
                     if (safetyTimeout) clearTimeout(safetyTimeout);
