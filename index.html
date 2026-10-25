@@ -349,7 +349,15 @@
         async function writeMarkdownFile(subDir, fileName, content, append = false) {
             if (!vaultDirHandle) return;
             try {
-                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
+                // サブフォルダの取得、なければ作成
+                let dirHandle;
+                try {
+                    dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
+                } catch (dirErr) {
+                    dbgLog(`[フォルダ作成失敗] ${subDir}: ${dirErr.message}`, true);
+                    throw dirErr;
+                }
+
                 let fileHandle = null;
                 let existingContent = "";
 
@@ -370,11 +378,12 @@
                 await writable.write(finalContent);
                 await writable.close();
                 dbgLog(`[保存成功] ${subDir}/${fileName}`);
+                return true;
             } catch (err) {
-                dbgLog(`[保存失敗] ${err.message}`, true);
+                dbgLog(`[保存失敗] ${subDir}/${fileName}: ${err.message}`, true);
+                return false;
             }
         }
-
         async function saveApiKeyToVault(key) {
             if (!vaultDirHandle || !key) return;
             await writeMarkdownFile("Settings", "API_KEY.md", key.trim(), false);
@@ -1271,21 +1280,35 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         }
 
         async function savePersonToVault(personName, descriptor) {
+            if (!descriptor) {
+                dbgLog("[人物登録エラー] 特徴量(descriptor)がありません", true);
+                return;
+            }
+
             const filename = `${personName}.md`;
             const descriptorArray = Array.from(descriptor);
             
             const jsonStr = JSON.stringify({ descriptor: descriptorArray });
             const content = `# 人物: ${personName}\n**登録日時**: ${new Date().toLocaleString()}\n\n\`\`\`json\n${jsonStr}\n\`\`\`\n`;
 
-            await writeMarkdownFile("Persons", filename, content, false);
+            // Vaultへ書き込み
+            const isSaved = await writeMarkdownFile("Persons", filename, content, false);
 
-            knownFaces.push({
-                name: personName,
-                descriptor: descriptor
-            });
-            dbgLog(`[人物登録完了] Persons/${filename} を作成しました`);
+            // メモリ上の配列へ追加（書き込み成否にかかわらず当セッション中は覚える）
+            const exists = knownFaces.some(f => f.name === personName);
+            if (!exists) {
+                knownFaces.push({
+                    name: personName,
+                    descriptor: descriptor
+                });
+            }
+
+            if (isSaved) {
+                dbgLog(`[人物登録完了] Persons/${filename} を作成・メモリ追加しました`);
+            } else {
+                dbgLog(`[警告] Persons/${filename} のVault保存に失敗しましたが、メモリ上には登録しました`, true);
+            }
         }
-
         async function loadKnownFacesFromVault() {
             if (!vaultDirHandle) return;
             knownFaces = [];
