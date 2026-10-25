@@ -827,6 +827,8 @@ function resetInteractionState(delay = 8000) {
 
                 if (isWaitingForName) {
                     isWaitingForName = false;
+                    const savedDescriptor = pendingFaceDescriptor;
+                    pendingFaceDescriptor = null;
                     const transcriptClean = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
 
                     const denyKeywords = ['違う', 'ううん', 'いや', 'いいえ', 'やめる', 'キャンセル', 'ちがう'];
@@ -845,7 +847,7 @@ function resetInteractionState(delay = 8000) {
                     const speakName = hasSuffix ? personName : `${personName}さん`;
 
                     speak(`「${speakName}」だね。覚えたよ！`, async () => {
-                        await savePersonToVault(personName, pendingFaceDescriptor);
+                        await savePersonToVault(personName, savedDescriptor);
                         currentPresentPersons.add(personName);
                         personSeenTimestamps.set(personName, Date.now());
                         setEmotion('Happy');
