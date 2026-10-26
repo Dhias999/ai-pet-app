@@ -763,6 +763,7 @@
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
             const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
             const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
+            const vaultKnowledgeText = vaultContext ? `【Obsidian Vault内の記録・情報】:\n${vaultContext}\n` : "";
 
             const systemInstruction = `あなたは可愛らしいAIペットです。
 現在のリアルタイム日時、これまでのエピソード、およびObsidian Vault内に記録された情報を踏まえて、ユーザーの問いかけ（「教えて」「調べて」など）に対して知識や過去の記憶を結びつけ、自然かつ分かりやすく回答してください。
