@@ -683,6 +683,66 @@
             return recentRelated;
         }
 
+        // Vault全体の全 Markdown ファイルから関連キーワードを横断検索する関数
+        async function searchVaultByKeywords(userText) {
+            if (!vaultDirHandle || !userText) return "";
+
+            // 「教えて」「調べて」などのコマンド語尾や記号を除外して純粋な検索キーワードを抽出
+            const cleanText = userText.replace(/(教えて|調べて|調べ|について|とは|って|ですか|かな|？|\?|！|!)+$/g, '').trim();
+            if (!cleanText || cleanText.length < 2) return "";
+
+            let matchedBlocks = [];
+            const stopWords = ['今日', '昨日', '明日', 'なに', '何', 'これ', 'あれ', 'それ'];
+
+            // 名前の単語や一定以上の長さの単語を抽出
+            const searchKeywords = knownFaces.map(f => f.name)
+                .concat(knownLocations.map(l => l.name))
+                .concat([cleanText])
+                .filter(k => k && k.length >= 2 && !stopWords.includes(k));
+
+            if (searchKeywords.length === 0) return "";
+
+            // 再帰的にディレクトリを検索するヘルパー関数
+            async function searchDirectory(dirHandle, pathPrefix = "") {
+                for await (const [name, handle] of dirHandle.entries()) {
+                    if (handle.kind === 'directory') {
+                        // Settings フォルダは検索対象から除外
+                        if (name !== 'Settings') {
+                            await searchDirectory(handle, `${pathPrefix}${name}/`);
+                        }
+                    } else if (handle.kind === 'file' && name.endsWith('.md')) {
+                        try {
+                            const file = await handle.getFile();
+                            const text = await file.text();
+
+                            const matched = searchKeywords.some(kw => isExactWordMatch(text, kw) || text.includes(kw));
+                            if (matched) {
+                                const fileNameClean = name.replace('.md', '');
+                                // ファイル全体のテキストから不要なコードブロック等を除去して要約抽出
+                                const cleanContent = text.replace(/```json[\s\S]*?```/g, '').trim();
+                                if (cleanContent) {
+                                    matchedBlocks.push(`[参照ファイル: ${pathPrefix}${fileNameClean}]\n${cleanContent.substring(0, 300)}`);
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                }
+            }
+
+            try {
+                await searchDirectory(vaultDirHandle);
+            } catch (err) {
+                dbgLog(`[Vault全検索エラー] ${err.message}`, true);
+            }
+
+            if (matchedBlocks.length === 0) return "";
+
+            // 重複を排除して最大3件まで抽出
+            const uniqueBlocks = Array.from(new Set(matchedBlocks)).slice(-3);
+            dbgLog(`[Vault全検索] キーワード「${cleanText}」に関連するVaultファイル ${uniqueBlocks.length}件 を検出しました`);
+            return uniqueBlocks.join('\n\n');
+        }
+
         async function callGeminiAPI(userPrompt, previousPetSpeech = "", todayContext = "", relatedContext = "", maxRetries = 3) {
             if (isApiProcessing) {
                 dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
@@ -690,15 +750,21 @@
             }
 
             isApiProcessing = true;
+            const vaultContext = await searchVaultByKeywords(userPrompt);
             const currentDateTime = getCurrentDateTimeString(); // ★ 追加: 現在日時の取得
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
             const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
             const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
 
             const systemInstruction = `あなたは可愛らしいAIペットです。
-現在のリアルタイム日時、これまでの本日のエピソード、検索された過去の記憶（日付付き）、および直前の問いかけを踏まえて、時間の経過や現在時刻を適切に考慮しながら、ユーザーの発言に対して自然に文脈や記憶を繋げて回答してください。
+現在のリアルタイム日時、これまでのエピソード、およびObsidian Vault内に記録された情報を踏まえて、ユーザーの問いかけ（「教えて」「調べて」など）に対して知識や過去の記憶を結びつけ、自然かつ分かりやすく回答してください。
+
+【回答方針】
+- ユーザーから質問や調べものの依頼があった場合、【Obsidian Vault内の記録・情報】や【過去のエピソード記憶】に記載されている情報を最優先で参照して説明してください。
+- 40文字以内の話し言葉で短く可愛らしく返答してください。
 
 【現在のリアルタイム日時】: ${currentDateTime}
+${vaultKnowledgeText}
 ${episodeText}
 ${relatedText}
 ${contextText}
@@ -709,7 +775,7 @@ ${contextText}
 {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}
 
 感情基準:
-Happy: 嬉しい、挨拶、褒められた
+Happy: 嬉しい、挨拶、教える・知っている、褒められた
 Anger: 怒られた、いじわる
 Surprised: 驚き、びっくり
 Sad: 悲しい、バイバイ
