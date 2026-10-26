@@ -474,7 +474,7 @@
             return diffCount / (newPixels.length / 4);
         }
 
-        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 7000) {
+        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 10000) {
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
@@ -490,6 +490,14 @@
                 });
             }
 
+            // ★ 修正: Google Search Grounding (Web検索機能) を追加
+            const requestBody = {
+                contents: [{ role: "user", parts }],
+                tools: [
+                    { googleSearch: {} }
+                ]
+            };
+
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -497,7 +505,7 @@
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ role: "user", parts }] }),
+                    body: JSON.stringify(requestBody),
                     signal: controller.signal
                 });
 
