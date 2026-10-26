@@ -271,6 +271,16 @@
             dbgLog(`${e.message} (${e.filename}:${e.lineno})`, true);
         });
 
+        // 現在の「YYYY-MM-DD(曜日) HH:mm」形式の日時文字列を取得するヘルパー関数
+        function getCurrentDateTimeString() {
+            const now = new Date();
+            const days = ['日', '月', '火', '水', '木', '金', '土'];
+            const dateStr = now.toISOString().split('T')[0];
+            const dayStr = days[now.getDay()];
+            const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
+            return `${dateStr}(${dayStr}) ${timeStr}`;
+        }
+
         // 名前に応じた適切な表示名（敬称の二重化を防止）を返すヘルパー関数
         function getDisplayName(name) {
             if (!name) return '';
@@ -680,13 +690,15 @@
             }
 
             isApiProcessing = true;
+            const currentDateTime = getCurrentDateTimeString(); // ★ 追加: 現在日時の取得
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
             const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
             const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
 
             const systemInstruction = `あなたは可愛らしいAIペットです。
-これまでの本日のエピソード、検索された過去の記憶（人物や場所に関する情報）、および直前の問いかけを踏まえて、ユーザーの発言に対して自然に文脈や記憶を繋げて回答してください。
+現在のリアルタイム日時、これまでの本日のエピソード、検索された過去の記憶（日付付き）、および直前の問いかけを踏まえて、時間の経過や現在時刻を適切に考慮しながら、ユーザーの発言に対して自然に文脈や記憶を繋げて回答してください。
 
+【現在のリアルタイム日時】: ${currentDateTime}
 ${episodeText}
 ${relatedText}
 ${contextText}
@@ -1255,6 +1267,7 @@ Default: その他通常会話`;
         // ② 話題生成（getDisplayName を適用）
         async function generateTopicFromContext(personName, todayContext) {
             const displayName = getDisplayName(personName);
+            const currentDateTime = getCurrentDateTimeString();
             if (isApiProcessing) return { emotion: 'Happy', text: `${displayName}、何か面白いことあった？` };
 
             isApiProcessing = true;
@@ -1270,7 +1283,7 @@ Default: その他通常会話`;
 今日すでに一度挨拶をした相手「${displayName}」が目の前にいます。
 
 【現在のシチュエーション】
-- 現在の時間帯: ${timeOfDay} (${hour}時)
+- 現在のリアルタイム日時: ${currentDateTime} (${timeOfDay})
 - 現在地: ${currentKnownLocationName}
 
 【本日のエピソード記録】
