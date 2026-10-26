@@ -271,6 +271,14 @@
             dbgLog(`${e.message} (${e.filename}:${e.lineno})`, true);
         });
 
+        // 名前に応じた適切な表示名（敬称の二重化を防止）を返すヘルパー関数
+        function getDisplayName(name) {
+            if (!name) return '';
+            const suffixes = ['さん', 'ちゃん', 'くん', 'やん', '様'];
+            const hasSuffix = suffixes.some(suffix => name.endsWith(suffix));
+            return hasSuffix ? name : `${name}さん`;
+        }
+
         let IS_AI_MODE = true;
 
         let vaultDirHandle = null; 
@@ -460,13 +468,11 @@
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
-            // 修正箇所 1: gemini-3.6-flash に変更
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
             const parts = [{ text: systemInstruction }];
 
             if (imageBase64) {
                 parts.push({
-                    // 修正箇所 2: inline_data および mime_type へ変更 (REST API仕様)
                     inline_data: {
                         mime_type: "image/jpeg",
                         data: imageBase64
@@ -529,8 +535,9 @@
 
             isApiProcessing = true;
             const presentPersonsArray = Array.from(currentPresentPersons);
+            // ④ 修正: getDisplayName を使ってフォーマット
             const personContext = presentPersonsArray.length > 0 
-                ? presentPersonsArray.join('さん、') + 'さん' 
+                ? presentPersonsArray.map(name => getDisplayName(name)).join('、') 
                 : '誰もいない（または特定できない）';
 
             const systemInstruction = `あなたはAIペットです。現在の状態と送られたカメラ画像を見て、周りの状況（明るさ、出来事、周囲の物体、持ち物、ユーザーの動作など）を観察し、独り言として話しかけてください。
@@ -738,7 +745,8 @@ Default: その他通常会話`;
                 isApiProcessing = false;
             }
         }
-function resetInteractionState(delay = 8000) {
+
+        function resetInteractionState(delay = 8000) {
             isWaitingForName = false;
             isWaitingForLocationName = false;
             isConversing = false;
@@ -841,12 +849,13 @@ function resetInteractionState(delay = 8000) {
                         return;
                     }
 
-                    const personName = transcriptClean;
-                    const suffixes = ['さん', 'ちゃん', 'くん', 'やん'];
-                    const hasSuffix = suffixes.some(suffix => personName.endsWith(suffix));
-                    const speakName = hasSuffix ? personName : `${personName}さん`;
+                    // 1. 文末の「だよ」「です」「だ」「よ」などの語尾・記号を除去
+                    let extractedName = transcriptClean.replace(/(だよ|です|だ|よ|ー|～|！|!|？|\?)+$/g, '').trim();
+                    if (!extractedName) extractedName = transcriptClean;
 
-                    // ★ 修正点: speak の完了を待たずに即時 Vault への保存処理を開始する
+                    const personName = extractedName;
+                    const speakName = getDisplayName(personName);
+
                     savePersonToVault(personName, savedDescriptor).then(() => {
                         currentPresentPersons.add(personName);
                         personSeenTimestamps.set(personName, Date.now());
@@ -865,19 +874,18 @@ function resetInteractionState(delay = 8000) {
 
                 if (isWaitingForLocationName) {
                     isWaitingForLocationName = false;
-                    // ★ 修正: 位置情報座標を安全に確保
                     const savedCoords = pendingLocationCoords;
                     pendingLocationCoords = null;
 
                     const locationName = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
 
                     speak(`「${locationName}」だね。覚えたよ！`, async () => {
-                        // ★ 修正: 保存処理へ確保した savedCoords を渡す
                         await saveLocationToVault(locationName, savedCoords);
                         
                         const presentPersonsArray = Array.from(currentPresentPersons);
+                        // ③ 修正: getDisplayName を配列全体に適用して二重敬称をクリア
                         const personText = presentPersonsArray.length > 0 
-                            ? `${presentPersonsArray.join('さん、')}さんと一緒に` 
+                            ? `${presentPersonsArray.map(name => getDisplayName(name)).join('、')}と一緒に` 
                             : '';
 
                         await saveEpisodeToVault(
@@ -980,7 +988,6 @@ function resetInteractionState(delay = 8000) {
         let recognitionInstance = null;
 
         function startListening() {
-            // ★ 強力な排他ガード: 発話中、すでに認識中、スリープ中、またはAPI処理中は絶対に起動しない
             if (isListening || isSpeaking || isSleeping || isApiProcessing) {
                 dbgLog(`[音声認識起動スキップ] 状態競合を検知 (Listening:${isListening}, Speaking:${isSpeaking}, Sleeping:${isSleeping}, API:${isApiProcessing})`);
                 return;
@@ -989,7 +996,6 @@ function resetInteractionState(delay = 8000) {
             try {
                 isConversing = true;
 
-                // 既存の認識インスタンスが存在する場合は完全にクリア
                 if (recognitionInstance) {
                     try { 
                         recognitionInstance.onstart = null;
@@ -1002,7 +1008,6 @@ function resetInteractionState(delay = 8000) {
 
                 recognitionInstance = createRecognitionInstance();
                 if (recognitionInstance) {
-                    // ★ 起動直前にフラグをオンにして重複実行を防止
                     isListening = true;
                     updateIndicators();
                     recognitionInstance.start();
@@ -1208,7 +1213,7 @@ function resetInteractionState(delay = 8000) {
                 const fileHandle = await dirHandle.getFileHandle(filename, { create: false });
                 const file = await fileHandle.getFile();
                 const text = await file.text();
-                return text.includes(`${personName}さん、こんにちは`);
+                return text.includes(`${personName}さん、こんにちは`) || text.includes(`${personName}、こんにちは`);
             } catch (err) {
                 return false;
             }
@@ -1247,8 +1252,10 @@ function resetInteractionState(delay = 8000) {
             }
         }
 
+        // ② 話題生成（getDisplayName を適用）
         async function generateTopicFromContext(personName, todayContext) {
-            if (isApiProcessing) return { emotion: 'Happy', text: `${personName}さん、何か面白いことあった？` };
+            const displayName = getDisplayName(personName);
+            if (isApiProcessing) return { emotion: 'Happy', text: `${displayName}、何か面白いことあった？` };
 
             isApiProcessing = true;
             const hour = new Date().getHours();
@@ -1260,7 +1267,7 @@ function resetInteractionState(delay = 8000) {
             else timeOfDay = "深夜";
 
             const systemInstruction = `あなたは可愛らしく少し気まぐれなAIペットです。
-今日すでに一度挨拶をした相手「${personName}さん」が目の前にいます。
+今日すでに一度挨拶をした相手「${displayName}」が目の前にいます。
 
 【現在のシチュエーション】
 - 現在の時間帯: ${timeOfDay} (${hour}時)
@@ -1290,7 +1297,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     const parsed = JSON.parse(jsonMatch[0]);
                     return {
                         emotion: parsed.emotion || 'Happy',
-                        text: parsed.text || `${personName}さん、調子はどう？`
+                        text: parsed.text || `${displayName}、調子はどう？`
                     };
                 }
             } catch (err) {
@@ -1300,10 +1307,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             }
 
             const fallbackTopics = [
-                `${personName}さん、何か面白いことあった？`,
-                `${personName}さん、調子はどう？`,
-                `${personName}さん、また会えて嬉しいな！`,
-                `${personName}さん、のんびりできてる？`
+                `${displayName}、何か面白いことあった？`,
+                `${displayName}、調子はどう？`,
+                `${displayName}、また会えて嬉しいな！`,
+                `${displayName}、のんびりできてる？`
             ];
             const randomTopic = fallbackTopics[Math.floor(Math.random() * fallbackTopics.length)];
 
@@ -1317,7 +1324,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             }
 
             const filename = `${personName}.md`;
-            // TypedArray/Float32Array または 通常配列 の両方に対応して純粋なArrayへ変換
             const descriptorArray = Array.from(descriptor);
             
             const jsonStr = JSON.stringify({ descriptor: descriptorArray });
@@ -1325,7 +1331,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             const isSaved = await writeMarkdownFile("Persons", filename, content, false);
 
-            // メモリへの登録・更新 (Float32Arrayに復元して格納)
             const float32Descriptor = new Float32Array(descriptorArray);
             const existingIndex = knownFaces.findIndex(f => f.name === personName);
             if (existingIndex >= 0) {
@@ -1415,7 +1420,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             dbgLog("[位置情報] GPS座標を取得中...");
 
-            // 独自の10秒タイムアウトPromiseを作成してハングを防止
             const timeoutPromise = new Promise((resolve) => {
                 setTimeout(() => {
                     dbgLog("[位置情報警告] 位置情報取得が独自タイムアウト(10秒)しました", true);
@@ -1438,21 +1442,19 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         resolve({ lat: null, lon: null });
                     },
                     { 
-                        enableHighAccuracy: false, // ハング回避のため一旦高精度をOFFにしWi-Fi/基地局測位を優先
+                        enableHighAccuracy: false,
                         timeout: 8000,
                         maximumAge: 60000
                     }
                 );
             });
 
-            // どちらか早い方を採用
             return await Promise.race([geoPromise, timeoutPromise]);
         }
 
         async function checkOrAskLocation() {
             const coords = await getCurrentLocation();
             
-            // 座標が確実に数値として存在するか判定
             if (coords.lat === null || coords.lon === null || isNaN(coords.lat) || isNaN(coords.lon)) {
                 currentKnownLocationName = "お出かけ先";
                 pendingLocationCoords = null;
@@ -1460,7 +1462,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 return { isKnown: true, name: currentKnownLocationName, message: "現在地が取得できなかったよ。" };
             }
 
-            // 取得成功時は pendingLocationCoords に確実に保存
             pendingLocationCoords = coords;
             dbgLog(`[位置情報判定] 座標保持: ${coords.lat}, ${coords.lon}`);
 
@@ -1746,7 +1747,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             dbgLog(`[発話] ${text}`);
             lastPetSpeech = text; 
 
-            // ★ 排他制御: 発話開始時に音声認識を強制終了してマイクを閉じる
             if (recognitionInstance) {
                 try {
                     recognitionInstance.onend = null;
@@ -1877,11 +1877,12 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         dbgLog(`[顔認識成功] 本日初回の ${bestMatchName} さんを認識しました`);
                         setEmotion('Happy');
                         
-                        const greetingText = `${bestMatchName}さん、こんにちは！`;
+                        const displayName = getDisplayName(bestMatchName);
+                        const greetingText = `${displayName}、こんにちは！`;
 
                         await saveEpisodeToVault(
                             "あいさつ",
-                            `顔認証で ${bestMatchName} さんを認識し、あいさつをした: 「${greetingText}」`,
+                            `顔認証で ${bestMatchName} を認識し、あいさつをした: 「${greetingText}」`,
                             currentKnownLocationName,
                             [bestMatchName]
                         );
@@ -1913,7 +1914,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 } else {
                     isConversing = true;
                     setEmotion('Surprised');
-                    // 特徴量の有無と要素数を厳格にチェック＆ログ出力
                     if (currentDescriptor && currentDescriptor.length > 0) {
                         pendingFaceDescriptor = Array.from(currentDescriptor);
                         dbgLog(`[顔認識成功] 未知の顔を検出。特徴量データセット完了 (要素数: ${pendingFaceDescriptor.length})`);
