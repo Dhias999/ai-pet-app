@@ -271,14 +271,36 @@
             dbgLog(`${e.message} (${e.filename}:${e.lineno})`, true);
         });
 
-        // 現在の「YYYY-MM-DD(曜日) HH:mm」形式の日時文字列を取得するヘルパー関数
+        // ローカルタイムゾーン基準の YYYY-MM-DD を返す（日付境界のUTCずれを防止）
+        function getLocalDateKey(date = new Date()) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        // 現在の「YYYY-MM-DD(曜日) HH:mm」形式の日時文字列を取得
         function getCurrentDateTimeString() {
             const now = new Date();
             const days = ['日', '月', '火', '水', '木', '金', '土'];
-            const dateStr = now.toISOString().split('T')[0];
+            const dateStr = getLocalDateKey(now);
             const dayStr = days[now.getDay()];
             const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
             return `${dateStr}(${dayStr}) ${timeStr}`;
+        }
+
+        // 外部入力やAI応答をHTMLとして解釈させず、安全にチャット欄へ表示
+        function addChatMessage(label, message, replace = false) {
+            const chatLog = document.getElementById('chatLog');
+            if (!chatLog) return;
+            if (replace) chatLog.replaceChildren();
+            else if (chatLog.childNodes.length > 0) chatLog.appendChild(document.createElement('br'));
+
+            const strong = document.createElement('strong');
+            strong.textContent = `${label}: `;
+            chatLog.appendChild(strong);
+            chatLog.appendChild(document.createTextNode(String(message ?? '')));
+            chatLog.scrollTop = chatLog.scrollHeight;
         }
 
         // 名前に応じた適切な表示名（敬称の二重化を防止）を返すヘルパー関数
@@ -317,6 +339,8 @@
         let hasRetriedSilence = false;      
 
         let isApiProcessing = false;
+        let activeGeminiController = null;
+        let interactionGeneration = 0;
         let envCheckBackoffDelay = 60000;
         let wakeLockObj = null;
 
@@ -510,6 +534,7 @@
             };
 
             const controller = new AbortController();
+            activeGeminiController = controller;
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
             try {
@@ -531,13 +556,20 @@
                 }
 
                 const data = await response.json();
-                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-                
+                const responseParts = data.candidates?.[0]?.content?.parts || [];
+                const rawText = responseParts
+                    .map(part => typeof part.text === 'string' ? part.text : '')
+                    .filter(Boolean)
+                    .join('\n')
+                    .trim();
+
                 return rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
             } catch (err) {
-                clearTimeout(timeoutId);
                 throw err;
+            } finally {
+                clearTimeout(timeoutId);
+                if (activeGeminiController === controller) activeGeminiController = null;
             }
         }
 
@@ -596,10 +628,7 @@
                     dbgLog(`[環境分析結果] shouldSpeak:${parsed.shouldSpeak}, 感情:${parsed.emotion}, テキスト:"${parsed.text}"`);
 
                     if (parsed.shouldSpeak && parsed.text && !isSpeaking && !isConversing) {
-                        const chatLog = document.getElementById('chatLog');
-                        if (chatLog) {
-                            chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
-                        }
+                        addChatMessage('ペット(独り言)', parsed.text);
 
                         await saveEpisodeToVault(
                             "環境の自動観察",
@@ -818,7 +847,11 @@ Default: その他通常会話`;
 
                     } catch (err) {
                         const isAbort = err.name === 'AbortError';
-                        const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
+                        if (isAbort) {
+                            dbgLog("[Gemini] 通信は中断されました。自動再試行は行いません", true);
+                            return { emotion: 'Default', text: "いったんお話を止めたよ。もう一度呼んでね。" };
+                        }
+                        const errorReason = err.message;
                         dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
 
                         if (attempt === maxRetries) {
@@ -841,6 +874,7 @@ Default: その他通常会話`;
         // ★ 音声認識および全対話状態を強制リセットするリカバリー関数
         function forceResetSpeechRecognition() {
             dbgLog("[SYSTEM] リカバリー: 音声認識と対話状態を強制リセットします");
+            interactionGeneration++;
 
             if (recognitionInstance) {
                 try {
@@ -859,12 +893,16 @@ Default: その他通常会話`;
                 } catch (e) {}
             }
 
+            // 通信そのものを中断する。isApiProcessing は各処理の finally で解除する。
+            if (activeGeminiController) {
+                try { activeGeminiController.abort(); } catch (e) {}
+            }
+
             if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
             
             isListening = false;
             isSpeaking = false;
             isConversing = false;
-            isApiProcessing = false;
             isWaitingForName = false;
             isWaitingForLocationName = false;
             pendingFaceDescriptor = null;
@@ -923,6 +961,7 @@ Default: その他通常会話`;
             };
 
             rec.onresult = async (event) => {
+                const turnGeneration = interactionGeneration;
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
                 hasUserRespondedInTurn = true; 
@@ -932,10 +971,7 @@ Default: その他通常会話`;
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
                 
                 dbgLog(`[音声認識結果] ${rawTranscript} (正規化: ${transcript})`);
-                const chatLog = document.getElementById('chatLog');
-                if (chatLog) {
-                    chatLog.innerHTML = `<strong>あなた:</strong> ${rawTranscript}`;
-                }
+                addChatMessage('あなた', rawTranscript, true);
 
                 if (transcript.includes('デバッグ') || transcript.includes('でばっぐ') || transcript.includes('debug')) {
                     const panel = document.getElementById('controlPanel');
@@ -1047,13 +1083,15 @@ Default: その他通常会話`;
                     });
 
                     const todayContext = await getTodayEpisodeText();
+                    if (turnGeneration !== interactionGeneration) return;
                     const relatedContext = await searchRelatedEpisodes(rawTranscript);
+                    if (turnGeneration !== interactionGeneration) return;
 
                     const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech, todayContext, relatedContext);
+                    // 強制リセット後に古い応答が発話・保存されるのを防止
+                    if (turnGeneration !== interactionGeneration) return;
                     
-                    if (chatLog) {
-                        chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
-                    }
+                    addChatMessage('ペット', aiResult.text);
 
                     const isErrorMessage = aiResult.text.includes("通信が混雑") || aiResult.text.includes("考えられなかった");
 
@@ -1311,7 +1349,7 @@ Default: その他通常会話`;
             if (!vaultDirHandle) return;
 
             const now = new Date();
-            const dateStr = now.toISOString().split('T')[0];
+            const dateStr = getLocalDateKey(now);
             const timeStr = now.toTimeString().split(' ')[0];
             const filename = `${dateStr}.md`;
 
@@ -1334,7 +1372,7 @@ Default: その他通常会話`;
 
         async function hasGreetedTodayFromVault(personName) {
             if (!vaultDirHandle) return false;
-            const dateStr = new Date().toISOString().split('T')[0];
+            const dateStr = getLocalDateKey(new Date());
             const filename = `${dateStr}.md`;
 
             try {
@@ -1351,7 +1389,7 @@ Default: その他通常会話`;
         async function getTodayEpisodeText() {
             if (!vaultDirHandle) return "";
             const now = new Date();
-            const dateStr = now.toISOString().split('T')[0];
+            const dateStr = getLocalDateKey(now);
             const filename = `${dateStr}.md`;
 
             let combinedText = "";
@@ -1361,7 +1399,7 @@ Default: その他通常会話`;
                 
                 if (now.getHours() < 5) {
                     const yesterday = new Date(now.getTime() - (24 * 60 * 60 * 1000));
-                    const prevFilename = `${yesterday.toISOString().split('T')[0]}.md`;
+                    const prevFilename = `${getLocalDateKey(yesterday)}.md`;
                     try {
                         const prevHandle = await dirHandle.getFileHandle(prevFilename, { create: false });
                         const prevFile = await prevHandle.getFile();
@@ -1663,7 +1701,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     throw new Error("Vaultフォルダへの書き込み権限が許可されませんでした。");
                 }
 
-                isActivated = true;
                 dbgLog("フォルダの書き込み権限取得に成功しました");
 
                 await requestWakeLock();
@@ -1671,9 +1708,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 const overlay = document.getElementById('activateOverlay');
                 const badge = document.getElementById('statusBadge');
                 const chatLog = document.getElementById('chatLog');
-
-                overlay.style.opacity = '0';
-                setTimeout(() => { overlay.style.display = 'none'; }, 300);
 
                 badge.innerText = "初期化中...";
 
@@ -1788,9 +1822,13 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                 initVoices();
 
+                // ここまで到達した場合のみ起動成功として扱う
+                isActivated = true;
+                overlay.style.opacity = '0';
+                setTimeout(() => { overlay.style.display = 'none'; }, 300);
                 badge.innerText = "待機モード";
                 const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
-                chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
+                addChatMessage('ペット', welcomeMsg, true);
                 setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
                 
                 startIdleAnimations();
@@ -1802,8 +1840,21 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 });
 
             } catch (err) {
+                isActivated = false;
+                const videoEl = document.getElementById('cameraStream');
+                if (videoEl?.srcObject) {
+                    videoEl.srcObject.getTracks().forEach(track => track.stop());
+                    videoEl.srcObject = null;
+                }
+                const overlay = document.getElementById('activateOverlay');
+                if (overlay) {
+                    overlay.style.display = 'flex';
+                    overlay.style.opacity = '1';
+                }
+                const badge = document.getElementById('statusBadge');
+                if (badge) badge.innerText = "起動失敗・再試行可能";
                 dbgLog(`[エラー例外捕捉] ${err.name}: ${err.message}`, true);
-                alert("起動エラー: " + err.message);
+                alert("起動エラー: " + err.message + "\n設定を確認して、もう一度起動できます。");
             }
         }
 
@@ -2028,10 +2079,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         
                         setEmotion(topicResult.emotion);
                         
-                        const chatLog = document.getElementById('chatLog');
-                        if (chatLog) {
-                            chatLog.innerHTML += `<br><strong>ペット:</strong> ${topicResult.text}`;
-                        }
+                        addChatMessage('ペット', topicResult.text);
 
                         dbgLog("[ログ制御] 再会時の話題発話のため Vault 保存をスキップします");
 
@@ -2061,8 +2109,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     }, 25000);
 
                     const unknownMsg = "あれ？初めて見るお顔だね。お名前を教えて！";
-                    const chatLog = document.getElementById('chatLog');
-                    if (chatLog) chatLog.innerHTML = `<strong>ペット:</strong> ${unknownMsg}`;
+                    addChatMessage('ペット', unknownMsg, true);
 
                     speak(unknownMsg, () => {});
                 }
