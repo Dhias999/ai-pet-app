@@ -322,6 +322,9 @@
 
         let lastFrameImageData = null;
 
+        // ★ 非同期ファイル書き込みキュー
+        let fileWriteQueue = Promise.resolve();
+
         async function requestWakeLock() {
             try {
                 if ('wakeLock' in navigator) {
@@ -364,49 +367,57 @@
             return savedKey;
         }
 
+        // ★ 改善: 排他制御キューを導入した writeMarkdownFile
         async function writeMarkdownFile(subDir, fileName, content, append = false) {
             if (!vaultDirHandle) {
                 dbgLog("[保存失敗] Vaultフォルダが選択されていません", true);
                 return false;
             }
 
-            try {
-                const options = { mode: 'readwrite' };
-                if ((await vaultDirHandle.queryPermission(options)) !== 'granted') {
-                    if ((await vaultDirHandle.requestPermission(options)) !== 'granted') {
-                        dbgLog("[保存失敗] Vaultへの書き込み権限が拒否されました", true);
-                        return false;
+            fileWriteQueue = fileWriteQueue.then(async () => {
+                try {
+                    const options = { mode: 'readwrite' };
+                    if ((await vaultDirHandle.queryPermission(options)) !== 'granted') {
+                        if ((await vaultDirHandle.requestPermission(options)) !== 'granted') {
+                            dbgLog("[保存失敗] Vaultへの書き込み権限が拒否されました", true);
+                            return false;
+                        }
                     }
-                }
 
-                const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
+                    const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
 
-                let fileHandle = null;
-                let existingContent = "";
+                    let fileHandle = null;
+                    let existingContent = "";
 
-                if (append) {
-                    try {
-                        fileHandle = await dirHandle.getFileHandle(fileName, { create: false });
-                        const file = await fileHandle.getFile();
-                        existingContent = await file.text();
-                    } catch (e) {
+                    if (append) {
+                        try {
+                            fileHandle = await dirHandle.getFileHandle(fileName, { create: false });
+                            const file = await fileHandle.getFile();
+                            existingContent = await file.text();
+                        } catch (e) {
+                            fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                        }
+                    } else {
                         fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
                     }
-                } else {
-                    fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+
+                    const finalContent = append && existingContent ? existingContent + "\n" + content : content;
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(finalContent);
+                    await writable.close();
+
+                    dbgLog(`[保存成功] ${subDir}/${fileName}`);
+                    return true;
+                } catch (err) {
+                    dbgLog(`[保存例外] ${subDir}/${fileName}: ${err.name} - ${err.message}`, true);
+                    return false;
                 }
-
-                const finalContent = append && existingContent ? existingContent + "\n" + content : content;
-                const writable = await fileHandle.createWritable();
-                await writable.write(finalContent);
-                await writable.close();
-
-                dbgLog(`[保存成功] ${subDir}/${fileName}`);
-                return true;
-            } catch (err) {
-                dbgLog(`[保存例外] ${subDir}/${fileName}: ${err.name} - ${err.message}`, true);
+            }).catch(err => {
+                dbgLog(`[キュー実行例外] ${err.message}`, true);
                 return false;
-            }
+            });
+
+            return await fileWriteQueue;
         }
 
         async function saveApiKeyToVault(key) {
@@ -474,7 +485,7 @@
             return diffCount / (newPixels.length / 4);
         }
 
-        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 10000) {
+        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 15000) {
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
@@ -490,7 +501,7 @@
                 });
             }
 
-            // ★ 修正: Google Search Grounding (Web検索機能) を追加
+            // Google Search Grounding (Web検索機能)
             const requestBody = {
                 contents: [{ role: "user", parts }],
                 tools: [
@@ -553,7 +564,6 @@
 
             isApiProcessing = true;
             const presentPersonsArray = Array.from(currentPresentPersons);
-            // ④ 修正: getDisplayName を使ってフォーマット
             const personContext = presentPersonsArray.length > 0 
                 ? presentPersonsArray.map(name => getDisplayName(name)).join('、') 
                 : '誰もいない（または特定できない）';
@@ -695,14 +705,12 @@
         async function searchVaultByKeywords(userText) {
             if (!vaultDirHandle || !userText) return "";
 
-            // 「教えて」「調べて」などのコマンド語尾や記号を除外して純粋な検索キーワードを抽出
             const cleanText = userText.replace(/(教えて|調べて|調べ|について|とは|って|ですか|かな|？|\?|！|!)+$/g, '').trim();
             if (!cleanText || cleanText.length < 2) return "";
 
             let matchedBlocks = [];
             const stopWords = ['今日', '昨日', '明日', 'なに', '何', 'これ', 'あれ', 'それ'];
 
-            // 名前の単語や一定以上の長さの単語を抽出
             const searchKeywords = knownFaces.map(f => f.name)
                 .concat(knownLocations.map(l => l.name))
                 .concat([cleanText])
@@ -710,11 +718,9 @@
 
             if (searchKeywords.length === 0) return "";
 
-            // 再帰的にディレクトリを検索するヘルパー関数
             async function searchDirectory(dirHandle, pathPrefix = "") {
                 for await (const [name, handle] of dirHandle.entries()) {
                     if (handle.kind === 'directory') {
-                        // Settings フォルダは検索対象から除外
                         if (name !== 'Settings') {
                             await searchDirectory(handle, `${pathPrefix}${name}/`);
                         }
@@ -726,7 +732,6 @@
                             const matched = searchKeywords.some(kw => isExactWordMatch(text, kw) || text.includes(kw));
                             if (matched) {
                                 const fileNameClean = name.replace('.md', '');
-                                // ファイル全体のテキストから不要なコードブロック等を除去して要約抽出
                                 const cleanContent = text.replace(/```json[\s\S]*?```/g, '').trim();
                                 if (cleanContent) {
                                     matchedBlocks.push(`[参照ファイル: ${pathPrefix}${fileNameClean}]\n${cleanContent.substring(0, 300)}`);
@@ -745,7 +750,6 @@
 
             if (matchedBlocks.length === 0) return "";
 
-            // 重複を排除して最大3件まで抽出
             const uniqueBlocks = Array.from(new Set(matchedBlocks)).slice(-3);
             dbgLog(`[Vault全検索] キーワード「${cleanText}」に関連するVaultファイル ${uniqueBlocks.length}件 を検出しました`);
             return uniqueBlocks.join('\n\n');
@@ -759,7 +763,7 @@
 
             isApiProcessing = true;
             const vaultContext = await searchVaultByKeywords(userPrompt);
-            const currentDateTime = getCurrentDateTimeString(); // ★ 追加: 現在日時の取得
+            const currentDateTime = getCurrentDateTimeString();
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
             const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
             const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
@@ -770,7 +774,7 @@
 
 【回答方針】
 - ユーザーから質問や調べものの依頼があった場合、【Obsidian Vault内の記録・情報】や【過去のエピソード記憶】に記載されている情報を最優先で参照して説明してください。
-- 40文字以内の話し言葉で短く可愛らしく返答してください。
+- ニュースや最新情報を調べる場合は、一番主要なニュースを1つだけピックアップし、40文字以内の短い話し言葉で要約して答えてください。
 
 【現在のリアルタイム日時】: ${currentDateTime}
 ${vaultKnowledgeText}
@@ -794,7 +798,8 @@ Default: その他通常会話`;
                 for (let attempt = 1; attempt <= maxRetries; attempt++) {
                     try {
                         dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
-                        const rawText = await executeGeminiRequest(systemInstruction, null, 7000);
+                        // ★ タイムアウトを 15秒 (15000ms) に拡張
+                        const rawText = await executeGeminiRequest(systemInstruction, null, 15000);
                         dbgLog(`[Gemini 受信テキスト] ${rawText}`);
 
                         const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
@@ -813,13 +818,13 @@ Default: その他通常会話`;
 
                     } catch (err) {
                         const isAbort = err.name === 'AbortError';
-                        const errorReason = isAbort ? "通信タイムアウト (7秒制限)" : err.message;
+                        const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                         dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
 
                         if (attempt === maxRetries) {
                             return {
                                 emotion: 'Sad',
-                                text: "ごめんね、通信が混雑していて上手くお返味が考えられなかったよ。"
+                                text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。"
                             };
                         }
 
@@ -831,6 +836,45 @@ Default: その他通常会話`;
             } finally {
                 isApiProcessing = false;
             }
+        }
+
+        // ★ 音声認識および全対話状態を強制リセットするリカバリー関数
+        function forceResetSpeechRecognition() {
+            dbgLog("[SYSTEM] リカバリー: 音声認識と対話状態を強制リセットします");
+
+            if (recognitionInstance) {
+                try {
+                    recognitionInstance.onstart = null;
+                    recognitionInstance.onend = null;
+                    recognitionInstance.onerror = null;
+                    recognitionInstance.onresult = null;
+                    recognitionInstance.abort();
+                } catch (e) {}
+                recognitionInstance = null;
+            }
+
+            if ('speechSynthesis' in window) {
+                try {
+                    window.speechSynthesis.cancel();
+                } catch (e) {}
+            }
+
+            if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
+            
+            isListening = false;
+            isSpeaking = false;
+            isConversing = false;
+            isApiProcessing = false;
+            isWaitingForName = false;
+            isWaitingForLocationName = false;
+            pendingFaceDescriptor = null;
+            pendingLocationCoords = null;
+            hasUserRespondedInTurn = false;
+            hasRetriedSilence = false;
+
+            stopLipSync();
+            if (!isSleeping) setEmotion('Default');
+            updateIndicators();
         }
 
         function resetInteractionState(delay = 8000) {
@@ -923,7 +967,7 @@ Default: その他通常会話`;
                 if (isWaitingForName) {
                     isWaitingForName = false;
                     const savedDescriptor = pendingFaceDescriptor;
-                    pendingFaceDescriptor = null; // 二重処理防止のため即クリア
+                    pendingFaceDescriptor = null;
                     
                     const transcriptClean = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
                     const denyKeywords = ['違う', 'ううん', 'いや', 'いいえ', 'やめる', 'キャンセル', 'ちがう'];
@@ -936,7 +980,6 @@ Default: その他通常会話`;
                         return;
                     }
 
-                    // 1. 文末の「だよ」「です」「だ」「よ」などの語尾・記号を除去
                     let extractedName = transcriptClean.replace(/(だよ|です|だ|よ|ー|～|！|!|？|\?)+$/g, '').trim();
                     if (!extractedName) extractedName = transcriptClean;
 
@@ -970,7 +1013,6 @@ Default: その他通常会話`;
                         await saveLocationToVault(locationName, savedCoords);
                         
                         const presentPersonsArray = Array.from(currentPresentPersons);
-                        // ③ 修正: getDisplayName を配列全体に適用して二重敬称をクリア
                         const personText = presentPersonsArray.length > 0 
                             ? `${presentPersonsArray.map(name => getDisplayName(name)).join('、')}と一緒に` 
                             : '';
@@ -1339,7 +1381,6 @@ Default: その他通常会話`;
             }
         }
 
-        // ② 話題生成（getDisplayName を適用）
         async function generateTopicFromContext(personName, todayContext) {
             const displayName = getDisplayName(personName);
             const currentDateTime = getCurrentDateTimeString();
@@ -2032,12 +2073,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             }
         }
 
+        // ★ 改善: 強制リカバリー組み込み済みの handleStageClick
         function handleStageClick() {
-            if (isSpeaking) {
-                dbgLog("[タップ無視] ペットが発話中のためタップを受け付けません");
-                return;
-            }
-
+            // スリープからの復帰
             if (isSleeping) {
                 isSleeping = false;
                 setEmotion('Default');
@@ -2053,6 +2091,12 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     scheduleNextEnvCheck(5000);
                 });
                 return;
+            }
+
+            // フリーズ・スタック対策: 状態異常が検知されたら強制リカバリー
+            if (isListening || isSpeaking || isApiProcessing) {
+                dbgLog("[タップ検知] 状態スタックを検出したため、強制リカバリーを実行します");
+                forceResetSpeechRecognition();
             }
 
             if (isWaitingForName || isWaitingForLocationName) {
