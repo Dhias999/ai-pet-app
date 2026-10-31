@@ -1188,7 +1188,13 @@ Default: その他通常会話`;
 
         let recognitionInstance = null;
 
-        function startListening() {
+        function startListening(retryWhenBusy = false, retryCount = 0) {
+            if (isApiProcessing && retryWhenBusy && retryCount < 24) {
+                // タップ直後にバックグラウンドAPIの中断処理が完了するまで待つ
+                if (retryCount === 0) dbgLog("[音声認識] API処理の終了を待ってから聞き取りを開始します");
+                setTimeout(() => startListening(true, retryCount + 1), 250);
+                return;
+            }
             if (isListening || isSpeaking || isSleeping || isApiProcessing || isTranscriptProcessing) {
                 dbgLog(`[音声認識起動スキップ] 状態競合を検知 (Listening:${isListening}, Speaking:${isSpeaking}, Sleeping:${isSleeping}, API:${isApiProcessing}, Transcript:${isTranscriptProcessing})`);
                 return;
@@ -2033,6 +2039,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         }
 
         async function performFaceRecognitionCheck() {
+            const visionGeneration = interactionGeneration;
             if (isApiProcessing || isSleeping || isConversing || isListening || isSpeaking || !isActivated || isWaitingForName || isWaitingForLocationName) {
                 scheduleNextVisionCheck(6000);
                 return;
@@ -2088,6 +2095,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                     currentPresentPersons.add(bestMatchName);
                     const alreadyGreeted = await hasGreetedTodayFromVault(bestMatchName);
+                    if (visionGeneration !== interactionGeneration) return;
 
                     if (!alreadyGreeted) {
                         dbgLog(`[顔認識成功] 本日初回の ${bestMatchName} さんを認識しました`);
@@ -2111,7 +2119,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         dbgLog(`[顔認識] ${bestMatchName} さんは本日あいさつ済みのため、本日のエピソードから話題を生成します`);
                         
                         const todayContext = await getTodayEpisodeText();
+                        if (visionGeneration !== interactionGeneration) return;
                         const topicResult = await generateTopicFromContext(bestMatchName, todayContext);
+                        // 手動タップなどで世代が変わった場合、古い話題を割り込ませない
+                        if (visionGeneration !== interactionGeneration) return;
                         
                         setEmotion(topicResult.emotion);
                         
@@ -2184,13 +2195,13 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             if (isWaitingForName || isWaitingForLocationName) {
                 dbgLog("画面タップにより入力待受の音声認識を開始します");
-                startListening();
+                startListening(true);
                 return;
             }
 
             dbgLog("画面タップによる通常会話の音声入力を開始します");
-            speak("なあに？お話を聞くよ。", () => {
-                startListening();
+            speak("うん、お話を聞くよ。", () => {
+                startListening(true);
             });
         }
     </script>
