@@ -2139,7 +2139,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 });
                 return;
             }
-
+            
             // フリーズ・スタック対策: 状態異常が検知されたら強制リカバリー
             if (isListening || isSpeaking || isApiProcessing) {
                 dbgLog("[タップ検知] 状態スタックを検出したため、強制リカバリーを実行します");
