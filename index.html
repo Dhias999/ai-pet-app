@@ -232,6 +232,8 @@
         <div class="log-container">
             <div id="chatLog" class="chat-log">フォルダを選択して起動してね！</div>
             <div class="hint-text">📁 ObsidianのVaultフォルダに直接書き込みます</div>
+            <button id="wakeModeButton" type="button" onclick="toggleWakeMode()" style="margin-top:10px;width:100%;padding:9px;border:0;border-radius:8px;background:#0984e3;color:#fff;font-weight:bold;cursor:pointer;">音声呼びかけ待機を開始</button>
+            <div id="wakeModeHint" class="hint-text">呼びかけ：「ねえ、ペットの名前」</div>
         </div>
     </div>
 
@@ -244,6 +246,13 @@
         <div>
             <label style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">音声選択:</label>
             <select id="voiceSelect" onchange="changeVoice(this)" style="width: 100%; font-size: 12px; background: #252525; color: #fff; border: 1px solid #444; padding: 6px; border-radius: 6px; box-sizing: border-box;"></select>
+        </div>
+
+        <div>
+            <label for="wakePetName" style="font-size: 12px; color: #74b9ff; display: block; margin-bottom: 4px;">呼びかけに使うペットの名前:</label>
+            <input id="wakePetName" class="api-key-input" type="text" maxlength="30" placeholder="例：ポチ">
+            <button type="button" onclick="saveWakePetName()" style="margin-top:6px;width:100%;padding:7px;border:0;border-radius:6px;background:#00b894;color:#fff;font-weight:bold;">呼びかけ名を保存</button>
+            <div class="hint-text">「ねえ、」＋ここで設定した名前で呼びかけます。Vaultの Settings/PET_NAME.md にも保存します。</div>
         </div>
 
         <div>
@@ -271,36 +280,14 @@
             dbgLog(`${e.message} (${e.filename}:${e.lineno})`, true);
         });
 
-        // ローカルタイムゾーン基準の YYYY-MM-DD を返す（日付境界のUTCずれを防止）
-        function getLocalDateKey(date = new Date()) {
-            const year = date.getFullYear();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
-            return `${year}-${month}-${day}`;
-        }
-
-        // 現在の「YYYY-MM-DD(曜日) HH:mm」形式の日時文字列を取得
+        // 現在の「YYYY-MM-DD(曜日) HH:mm」形式の日時文字列を取得するヘルパー関数
         function getCurrentDateTimeString() {
             const now = new Date();
             const days = ['日', '月', '火', '水', '木', '金', '土'];
-            const dateStr = getLocalDateKey(now);
+            const dateStr = now.toISOString().split('T')[0];
             const dayStr = days[now.getDay()];
             const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
             return `${dateStr}(${dayStr}) ${timeStr}`;
-        }
-
-        // 外部入力やAI応答をHTMLとして解釈させず、安全にチャット欄へ表示
-        function addChatMessage(label, message, replace = false) {
-            const chatLog = document.getElementById('chatLog');
-            if (!chatLog) return;
-            if (replace) chatLog.replaceChildren();
-            else if (chatLog.childNodes.length > 0) chatLog.appendChild(document.createElement('br'));
-
-            const strong = document.createElement('strong');
-            strong.textContent = `${label}: `;
-            chatLog.appendChild(strong);
-            chatLog.appendChild(document.createTextNode(String(message ?? '')));
-            chatLog.scrollTop = chatLog.scrollHeight;
         }
 
         // 名前に応じた適切な表示名（敬称の二重化を防止）を返すヘルパー関数
@@ -339,10 +326,10 @@
         let hasRetriedSilence = false;      
 
         let isApiProcessing = false;
-        let activeGeminiController = null;
-        let interactionGeneration = 0;
-        let pendingRecognitionTranscript = "";
-        let isTranscriptProcessing = false;
+        let wakePetName = localStorage.getItem('ai_pet_wake_name') || 'ポチ';
+        let isWakeModeEnabled = false;
+        let wakeRecognitionInstance = null;
+        let wakeRestartTimer = null;
         let envCheckBackoffDelay = 60000;
         let wakeLockObj = null;
 
@@ -385,6 +372,157 @@
                 }
             }
         });
+
+        function normalizeWakeText(value) {
+            return (value || '').toLowerCase().replace(/[\s、。，．,.!！?？「」『』]/g, '').replace(/ねー/g, 'ねえ');
+        }
+
+        function updateWakeModeUI() {
+            const button = document.getElementById('wakeModeButton');
+            const hint = document.getElementById('wakeModeHint');
+            const nameInput = document.getElementById('wakePetName');
+            if (nameInput && nameInput.value !== wakePetName) nameInput.value = wakePetName;
+            if (button) {
+                button.textContent = isWakeModeEnabled ? '音声呼びかけ待機を停止' : '音声呼びかけ待機を開始';
+                button.style.background = isWakeModeEnabled ? '#d63031' : '#0984e3';
+            }
+            if (hint) hint.textContent = `呼びかけ：「ねえ、${wakePetName}」`;
+        }
+
+        async function saveWakePetName() {
+            const input = document.getElementById('wakePetName');
+            const value = (input ? input.value : '').trim().replace(/[\r\n]/g, '').slice(0, 30);
+            if (!value) {
+                alert('ペットの名前を入力してください。');
+                return;
+            }
+            wakePetName = value;
+            localStorage.setItem('ai_pet_wake_name', wakePetName);
+            if (vaultDirHandle) {
+                const saved = await writeMarkdownFile('Settings', 'PET_NAME.md', wakePetName, false);
+                if (!saved) dbgLog('[呼びかけ設定] Vaultへの保存に失敗しました。端末内設定には保存済みです', true);
+            }
+            updateWakeModeUI();
+            dbgLog(`[呼びかけ設定] ペット名を「${wakePetName}」に設定しました`);
+        }
+
+        async function loadWakePetNameFromVault() {
+            if (!vaultDirHandle) return;
+            try {
+                const settingsDir = await vaultDirHandle.getDirectoryHandle('Settings', { create: false });
+                const fileHandle = await settingsDir.getFileHandle('PET_NAME.md', { create: false });
+                const file = await fileHandle.getFile();
+                const value = (await file.text()).trim().replace(/[\r\n]/g, '').slice(0, 30);
+                if (value) {
+                    wakePetName = value;
+                    localStorage.setItem('ai_pet_wake_name', wakePetName);
+                    dbgLog(`[呼びかけ設定] Vaultからペット名「${wakePetName}」を読み込みました`);
+                }
+            } catch (err) {
+                dbgLog('[呼びかけ設定] Vault内に Settings/PET_NAME.md がないため、端末内設定を使用します');
+            }
+            updateWakeModeUI();
+        }
+
+        function stopWakeRecognition() {
+            if (wakeRestartTimer) {
+                clearTimeout(wakeRestartTimer);
+                wakeRestartTimer = null;
+            }
+            if (wakeRecognitionInstance) {
+                const old = wakeRecognitionInstance;
+                wakeRecognitionInstance = null;
+                old.onend = null;
+                old.onerror = null;
+                old.onresult = null;
+                try { old.abort(); } catch (e) {}
+            }
+        }
+
+        function startWakeRecognition() {
+            if (!isWakeModeEnabled || !isActivated || isSleeping || isListening || isSpeaking || isApiProcessing || isConversing || wakeRecognitionInstance) return;
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                dbgLog('[呼びかけ待機] このブラウザは音声認識に対応していません', true);
+                isWakeModeEnabled = false;
+                updateWakeModeUI();
+                return;
+            }
+
+            try {
+                const rec = new SpeechRecognition();
+                wakeRecognitionInstance = rec;
+                rec.lang = 'ja-JP';
+                rec.continuous = true;
+                rec.interimResults = false;
+                rec.maxAlternatives = 1;
+                rec.onstart = () => dbgLog(`[呼びかけ待機] 「ねえ、${wakePetName}」を待っています`);
+                rec.onresult = (event) => {
+                    for (let i = event.resultIndex || 0; i < event.results.length; i++) {
+                        if (!event.results[i].isFinal) continue;
+                        const heard = event.results[i][0].transcript || '';
+                        const normalized = normalizeWakeText(heard);
+                        const wakePhrase = normalizeWakeText('ねえ' + wakePetName);
+                        dbgLog(`[呼びかけ認識] ${heard}`);
+                        if (normalized.includes(wakePhrase)) {
+                            dbgLog(`[呼びかけ検知] 「ねえ、${wakePetName}」を認識しました`);
+                            stopWakeRecognition();
+                            speak('うん、どうぞ。', () => {
+                                if (isWakeModeEnabled && !isSleeping) startListening();
+                            });
+                            return;
+                        }
+                    }
+                };
+                rec.onerror = (event) => {
+                    dbgLog(`[呼びかけ待機エラー] ${event.error}`, true);
+                    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                        isWakeModeEnabled = false;
+                        updateWakeModeUI();
+                    }
+                };
+                rec.onend = () => {
+                    if (wakeRecognitionInstance === rec) wakeRecognitionInstance = null;
+                    if (isWakeModeEnabled && !isSleeping) {
+                        wakeRestartTimer = setTimeout(() => {
+                            wakeRestartTimer = null;
+                            startWakeRecognition();
+                        }, 900);
+                    }
+                };
+                rec.start();
+            } catch (err) {
+                wakeRecognitionInstance = null;
+                dbgLog(`[呼びかけ待機開始失敗] ${err.message}`, true);
+                if (isWakeModeEnabled) {
+                    wakeRestartTimer = setTimeout(() => {
+                        wakeRestartTimer = null;
+                        startWakeRecognition();
+                    }, 1500);
+                }
+            }
+        }
+
+        function toggleWakeMode() {
+            if (!isActivated) {
+                alert('先にVaultフォルダを選択して起動してください。');
+                return;
+            }
+            if (isWakeModeEnabled) {
+                isWakeModeEnabled = false;
+                stopWakeRecognition();
+                dbgLog('[呼びかけ待機] 停止しました');
+            } else {
+                const input = document.getElementById('wakePetName');
+                if (input && input.value.trim()) wakePetName = input.value.trim().slice(0, 30);
+                if (!wakePetName) wakePetName = 'ポチ';
+                localStorage.setItem('ai_pet_wake_name', wakePetName);
+                isWakeModeEnabled = true;
+                dbgLog(`[呼びかけ待機] 開始します。呼びかけ：「ねえ、${wakePetName}」`);
+                startWakeRecognition();
+            }
+            updateWakeModeUI();
+        }
 
         function loadApiKey() {
             const savedKey = localStorage.getItem('gemini_api_key') || '';
@@ -536,7 +674,6 @@
             };
 
             const controller = new AbortController();
-            activeGeminiController = controller;
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
             try {
@@ -558,20 +695,13 @@
                 }
 
                 const data = await response.json();
-                const responseParts = data.candidates?.[0]?.content?.parts || [];
-                const rawText = responseParts
-                    .map(part => typeof part.text === 'string' ? part.text : '')
-                    .filter(Boolean)
-                    .join('\n')
-                    .trim();
-
+                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                
                 return rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
             } catch (err) {
-                throw err;
-            } finally {
                 clearTimeout(timeoutId);
-                if (activeGeminiController === controller) activeGeminiController = null;
+                throw err;
             }
         }
 
@@ -630,7 +760,10 @@
                     dbgLog(`[環境分析結果] shouldSpeak:${parsed.shouldSpeak}, 感情:${parsed.emotion}, テキスト:"${parsed.text}"`);
 
                     if (parsed.shouldSpeak && parsed.text && !isSpeaking && !isConversing) {
-                        addChatMessage('ペット(独り言)', parsed.text);
+                        const chatLog = document.getElementById('chatLog');
+                        if (chatLog) {
+                            chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
+                        }
 
                         await saveEpisodeToVault(
                             "環境の自動観察",
@@ -788,13 +921,11 @@
 
         async function callGeminiAPI(userPrompt, previousPetSpeech = "", todayContext = "", relatedContext = "", maxRetries = 3) {
             if (isApiProcessing) {
-                dbgLog("[Gemini] 別のAPI通信中のため、この重複リクエストを開始しません", true);
-                return { emotion: 'Default', text: "少し待ってから、もう一度話しかけてね。" };
+                dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
+                return { emotion: 'Sad', text: "ちょっと待ってね、考え中だよ。" };
             }
 
-            // Vault検索を含む全工程を1つのAPIターンとしてロックする
             isApiProcessing = true;
-            try {
             const vaultContext = await searchVaultByKeywords(userPrompt);
             const currentDateTime = getCurrentDateTimeString();
             const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
@@ -827,6 +958,7 @@ Surprised: 驚き、びっくり
 Sad: 悲しい、バイバイ
 Default: その他通常会話`;
 
+            try {
                 for (let attempt = 1; attempt <= maxRetries; attempt++) {
                     try {
                         dbgLog(`[Gemini リクエスト送信 (試行 ${attempt}/${maxRetries})] "${userPrompt}"`);
@@ -850,11 +982,7 @@ Default: その他通常会話`;
 
                     } catch (err) {
                         const isAbort = err.name === 'AbortError';
-                        if (isAbort) {
-                            dbgLog("[Gemini] 通信は中断されました。自動再試行は行いません", true);
-                            return { emotion: 'Default', text: "いったんお話を止めたよ。もう一度呼んでね。" };
-                        }
-                        const errorReason = err.message;
+                        const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                         dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
 
                         if (attempt === maxRetries) {
@@ -877,8 +1005,6 @@ Default: その他通常会話`;
         // ★ 音声認識および全対話状態を強制リセットするリカバリー関数
         function forceResetSpeechRecognition() {
             dbgLog("[SYSTEM] リカバリー: 音声認識と対話状態を強制リセットします");
-            interactionGeneration++;
-            pendingRecognitionTranscript = "";
 
             if (recognitionInstance) {
                 try {
@@ -897,16 +1023,12 @@ Default: その他通常会話`;
                 } catch (e) {}
             }
 
-            // 通信そのものを中断する。isApiProcessing は各処理の finally で解除する。
-            if (activeGeminiController) {
-                try { activeGeminiController.abort(); } catch (e) {}
-            }
-
             if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
             
             isListening = false;
             isSpeaking = false;
             isConversing = false;
+            isApiProcessing = false;
             isWaitingForName = false;
             isWaitingForLocationName = false;
             pendingFaceDescriptor = null;
@@ -934,6 +1056,13 @@ Default: その他通常会話`;
             if (!isSleeping) setEmotion('Default');
             scheduleNextVisionCheck(delay);
             scheduleNextEnvCheck(envCheckBackoffDelay);
+            if (isWakeModeEnabled && !isSleeping) {
+                if (wakeRestartTimer) clearTimeout(wakeRestartTimer);
+                wakeRestartTimer = setTimeout(() => {
+                    wakeRestartTimer = null;
+                    startWakeRecognition();
+                }, 1200);
+            }
             dbgLog("[SYSTEM] インタラクション状態をリセットしました");
         }
 
@@ -964,17 +1093,20 @@ Default: その他通常会話`;
                 }, 20000);
             };
 
-            async function processRecognizedTranscript(rawTranscript, turnGeneration) {
+            rec.onresult = async (event) => {
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
-                if (!rawTranscript || turnGeneration !== interactionGeneration) return;
 
-                hasUserRespondedInTurn = true;
+                hasUserRespondedInTurn = true; 
                 hasRetriedSilence = false;
 
+                const rawTranscript = event.results[0][0].transcript.trim();
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
                 
                 dbgLog(`[音声認識結果] ${rawTranscript} (正規化: ${transcript})`);
-                addChatMessage('あなた', rawTranscript, true);
+                const chatLog = document.getElementById('chatLog');
+                if (chatLog) {
+                    chatLog.innerHTML = `<strong>あなた:</strong> ${rawTranscript}`;
+                }
 
                 if (transcript.includes('デバッグ') || transcript.includes('でばっぐ') || transcript.includes('debug')) {
                     const panel = document.getElementById('controlPanel');
@@ -1086,15 +1218,13 @@ Default: その他通常会話`;
                     });
 
                     const todayContext = await getTodayEpisodeText();
-                    if (turnGeneration !== interactionGeneration) return;
                     const relatedContext = await searchRelatedEpisodes(rawTranscript);
-                    if (turnGeneration !== interactionGeneration) return;
 
                     const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech, todayContext, relatedContext);
-                    // 強制リセット後に古い応答が発話・保存されるのを防止
-                    if (turnGeneration !== interactionGeneration) return;
                     
-                    addChatMessage('ペット', aiResult.text);
+                    if (chatLog) {
+                        chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
+                    }
 
                     const isErrorMessage = aiResult.text.includes("通信が混雑") || aiResult.text.includes("考えられなかった");
 
@@ -1126,23 +1256,6 @@ Default: その他通常会話`;
                 }
 
                 resetInteractionState(8000);
-            }
-
-            // Android Chromeは確定結果を複数回に分けて通知することがある。
-            // event.results 全体を結合し、認識セッション終了後に1回だけ処理する。
-            rec.onresult = (event) => {
-                const parts = [];
-                for (let i = 0; i < event.results.length; i++) {
-                    const result = event.results[i];
-                    if (result && result.isFinal && result[0] && result[0].transcript) {
-                        parts.push(result[0].transcript.trim());
-                    }
-                }
-                pendingRecognitionTranscript = parts.join('').trim();
-                if (pendingRecognitionTranscript) {
-                    dbgLog(`[音声認識候補更新] ${pendingRecognitionTranscript}`);
-                }
-                hasUserRespondedInTurn = !!pendingRecognitionTranscript;
             };
 
             rec.onerror = (event) => {
@@ -1155,30 +1268,16 @@ Default: その他通常会話`;
                 updateIndicators();
                 dbgLog("[音声認識] 終了");
 
-                const completedTranscript = pendingRecognitionTranscript.trim();
-                pendingRecognitionTranscript = "";
-
-                if (completedTranscript && !isTranscriptProcessing) {
-                    const turnGeneration = interactionGeneration;
-                    isTranscriptProcessing = true;
-                    dbgLog(`[音声認識確定] 1ターン分の発話を処理します: ${completedTranscript}`);
-                    processRecognizedTranscript(completedTranscript, turnGeneration)
-                        .catch(err => {
-                            dbgLog(`[会話処理エラー] ${err.message}`, true);
-                            if (turnGeneration === interactionGeneration) resetInteractionState(5000);
-                        })
-                        .finally(() => { isTranscriptProcessing = false; });
-                    return;
-                }
-
                 if (isConversing && !hasUserRespondedInTurn && !hasRetriedSilence && !isSleeping) {
                     hasRetriedSilence = true;
                     dbgLog("[音声認識] 発話未検知による無音終了。1秒後に1回だけ自動リトライします...");
                     setTimeout(() => {
-                        if (isConversing && !isListening && !isSpeaking && !isApiProcessing) startListening();
+                        if (isConversing && !isListening && !isSpeaking) {
+                            startListening();
+                        }
                     }, 1000);
-                } else if (!isTranscriptProcessing && !isApiProcessing && !isSpeaking) {
-                    dbgLog("[音声認識] 発話なしで終了したため通常待機へ戻ります");
+                } else {
+                    dbgLog("[音声認識] 会話をクリアして通常待機モードへ戻ります");
                     resetInteractionState(5000);
                 }
             };
@@ -1188,22 +1287,14 @@ Default: その他通常会話`;
 
         let recognitionInstance = null;
 
-        function startListening(retryWhenBusy = false, retryCount = 0) {
-            if (isApiProcessing && retryWhenBusy && retryCount < 24) {
-                // タップ直後にバックグラウンドAPIの中断処理が完了するまで待つ
-                if (retryCount === 0) dbgLog("[音声認識] API処理の終了を待ってから聞き取りを開始します");
-                setTimeout(() => startListening(true, retryCount + 1), 250);
-                return;
-            }
-            if (isListening || isSpeaking || isSleeping || isApiProcessing || isTranscriptProcessing) {
-                dbgLog(`[音声認識起動スキップ] 状態競合を検知 (Listening:${isListening}, Speaking:${isSpeaking}, Sleeping:${isSleeping}, API:${isApiProcessing}, Transcript:${isTranscriptProcessing})`);
+        function startListening() {
+            if (isListening || isSpeaking || isSleeping || isApiProcessing) {
+                dbgLog(`[音声認識起動スキップ] 状態競合を検知 (Listening:${isListening}, Speaking:${isSpeaking}, Sleeping:${isSleeping}, API:${isApiProcessing})`);
                 return;
             }
 
             try {
                 isConversing = true;
-                pendingRecognitionTranscript = "";
-                hasUserRespondedInTurn = false;
 
                 if (recognitionInstance) {
                     try { 
@@ -1280,6 +1371,7 @@ Default: その他通常会話`;
             setEmotion('Default');
             initVoices();
             loadApiKey();
+            updateWakeModeUI();
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.onvoiceschanged = () => {
                     if (!voicesInitialized) initVoices();
@@ -1391,7 +1483,7 @@ Default: その他通常会話`;
             if (!vaultDirHandle) return;
 
             const now = new Date();
-            const dateStr = getLocalDateKey(now);
+            const dateStr = now.toISOString().split('T')[0];
             const timeStr = now.toTimeString().split(' ')[0];
             const filename = `${dateStr}.md`;
 
@@ -1414,7 +1506,7 @@ Default: その他通常会話`;
 
         async function hasGreetedTodayFromVault(personName) {
             if (!vaultDirHandle) return false;
-            const dateStr = getLocalDateKey(new Date());
+            const dateStr = new Date().toISOString().split('T')[0];
             const filename = `${dateStr}.md`;
 
             try {
@@ -1431,7 +1523,7 @@ Default: その他通常会話`;
         async function getTodayEpisodeText() {
             if (!vaultDirHandle) return "";
             const now = new Date();
-            const dateStr = getLocalDateKey(now);
+            const dateStr = now.toISOString().split('T')[0];
             const filename = `${dateStr}.md`;
 
             let combinedText = "";
@@ -1441,7 +1533,7 @@ Default: その他通常会話`;
                 
                 if (now.getHours() < 5) {
                     const yesterday = new Date(now.getTime() - (24 * 60 * 60 * 1000));
-                    const prevFilename = `${getLocalDateKey(yesterday)}.md`;
+                    const prevFilename = `${yesterday.toISOString().split('T')[0]}.md`;
                     try {
                         const prevHandle = await dirHandle.getFileHandle(prevFilename, { create: false });
                         const prevFile = await prevHandle.getFile();
@@ -1743,6 +1835,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     throw new Error("Vaultフォルダへの書き込み権限が許可されませんでした。");
                 }
 
+                isActivated = true;
                 dbgLog("フォルダの書き込み権限取得に成功しました");
 
                 await requestWakeLock();
@@ -1750,6 +1843,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 const overlay = document.getElementById('activateOverlay');
                 const badge = document.getElementById('statusBadge');
                 const chatLog = document.getElementById('chatLog');
+
+                overlay.style.opacity = '0';
+                setTimeout(() => { overlay.style.display = 'none'; }, 300);
 
                 badge.innerText = "初期化中...";
 
@@ -1850,6 +1946,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                 badge.innerText = "APIキー確認中";
                 let apiKey = await loadApiKeyFromVault();
+                await loadWakePetNameFromVault();
                 if (!apiKey) {
                     const inputKey = prompt("Gemini APIキーが見つかりませんでした。\nAPIキーを入力してください（Settings/API_KEY.md に自動設置されます）:");
                     if (inputKey && inputKey.trim() !== "") {
@@ -1864,13 +1961,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                 initVoices();
 
-                // ここまで到達した場合のみ起動成功として扱う
-                isActivated = true;
-                overlay.style.opacity = '0';
-                setTimeout(() => { overlay.style.display = 'none'; }, 300);
                 badge.innerText = "待機モード";
                 const welcomeMsg = `起動完了！Obsidian Vaultと接続したよ！（記憶人数: ${knownFaces.length}人）${locResult.message}`;
-                addChatMessage('ペット', welcomeMsg, true);
+                chatLog.innerHTML = `<strong>ペット:</strong> ${welcomeMsg}`;
                 setEmotion(locResult.isKnown ? 'Happy' : 'Surprised');
                 
                 startIdleAnimations();
@@ -1882,21 +1975,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 });
 
             } catch (err) {
-                isActivated = false;
-                const videoEl = document.getElementById('cameraStream');
-                if (videoEl?.srcObject) {
-                    videoEl.srcObject.getTracks().forEach(track => track.stop());
-                    videoEl.srcObject = null;
-                }
-                const overlay = document.getElementById('activateOverlay');
-                if (overlay) {
-                    overlay.style.display = 'flex';
-                    overlay.style.opacity = '1';
-                }
-                const badge = document.getElementById('statusBadge');
-                if (badge) badge.innerText = "起動失敗・再試行可能";
                 dbgLog(`[エラー例外捕捉] ${err.name}: ${err.message}`, true);
-                alert("起動エラー: " + err.message + "\n設定を確認して、もう一度起動できます。");
+                alert("起動エラー: " + err.message);
             }
         }
 
@@ -1999,7 +2079,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     isSpeaking = false;
                     stopLipSync();
 
-                    if (!isSleeping && isQuestionText(text) && !isListening) {
+                    if (!isSleeping && !isWakeModeEnabled && isQuestionText(text) && !isListening) {
                         dbgLog("[質問検知] 疑問形の発話が完了したため、1200ms後に自動で音声入力を開始します");
                         setTimeout(() => {
                             if (!isListening && !isSpeaking) startListening();
@@ -2039,7 +2119,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         }
 
         async function performFaceRecognitionCheck() {
-            const visionGeneration = interactionGeneration;
             if (isApiProcessing || isSleeping || isConversing || isListening || isSpeaking || !isActivated || isWaitingForName || isWaitingForLocationName) {
                 scheduleNextVisionCheck(6000);
                 return;
@@ -2095,7 +2174,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                     currentPresentPersons.add(bestMatchName);
                     const alreadyGreeted = await hasGreetedTodayFromVault(bestMatchName);
-                    if (visionGeneration !== interactionGeneration) return;
 
                     if (!alreadyGreeted) {
                         dbgLog(`[顔認識成功] 本日初回の ${bestMatchName} さんを認識しました`);
@@ -2119,14 +2197,14 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                         dbgLog(`[顔認識] ${bestMatchName} さんは本日あいさつ済みのため、本日のエピソードから話題を生成します`);
                         
                         const todayContext = await getTodayEpisodeText();
-                        if (visionGeneration !== interactionGeneration) return;
                         const topicResult = await generateTopicFromContext(bestMatchName, todayContext);
-                        // 手動タップなどで世代が変わった場合、古い話題を割り込ませない
-                        if (visionGeneration !== interactionGeneration) return;
                         
                         setEmotion(topicResult.emotion);
                         
-                        addChatMessage('ペット', topicResult.text);
+                        const chatLog = document.getElementById('chatLog');
+                        if (chatLog) {
+                            chatLog.innerHTML += `<br><strong>ペット:</strong> ${topicResult.text}`;
+                        }
 
                         dbgLog("[ログ制御] 再会時の話題発話のため Vault 保存をスキップします");
 
@@ -2156,7 +2234,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     }, 25000);
 
                     const unknownMsg = "あれ？初めて見るお顔だね。お名前を教えて！";
-                    addChatMessage('ペット', unknownMsg, true);
+                    const chatLog = document.getElementById('chatLog');
+                    if (chatLog) chatLog.innerHTML = `<strong>ペット:</strong> ${unknownMsg}`;
 
                     speak(unknownMsg, () => {});
                 }
@@ -2169,6 +2248,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
         // ★ 改善: 強制リカバリー組み込み済みの handleStageClick
         function handleStageClick() {
+            // タップ操作を優先するため、呼びかけ待機の認識だけ一時停止（設定自体は維持）
+            if (wakeRecognitionInstance) stopWakeRecognition();
+
             // スリープからの復帰
             if (isSleeping) {
                 isSleeping = false;
@@ -2183,25 +2265,28 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     startIdleAnimations();
                     scheduleNextVisionCheck(2000);
                     scheduleNextEnvCheck(5000);
+                    if (isWakeModeEnabled) {
+                        setTimeout(() => startWakeRecognition(), 1200);
+                    }
                 });
                 return;
             }
 
             // フリーズ・スタック対策: 状態異常が検知されたら強制リカバリー
-            if (isListening || isSpeaking || isApiProcessing || isTranscriptProcessing) {
+            if (isListening || isSpeaking || isApiProcessing) {
                 dbgLog("[タップ検知] 状態スタックを検出したため、強制リカバリーを実行します");
                 forceResetSpeechRecognition();
             }
 
             if (isWaitingForName || isWaitingForLocationName) {
                 dbgLog("画面タップにより入力待受の音声認識を開始します");
-                startListening(true);
+                startListening();
                 return;
             }
 
             dbgLog("画面タップによる通常会話の音声入力を開始します");
-            speak("うん、お話を聞くよ。", () => {
-                startListening(true);
+            speak("なあに？お話を聞くよ。", () => {
+                startListening();
             });
         }
     </script>
