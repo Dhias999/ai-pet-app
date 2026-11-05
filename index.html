@@ -949,7 +949,23 @@ ${contextText}
 【ユーザーの発言】: 「${userPrompt}」
 
 フォーマット:
-{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}
+{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉","emo":"内部感情の増減を key+数値 の形でカンマ区切り。変化がなければ空文字"}
+
+内部感情(emo)の基準: 各値は-15〜+15。変化したものだけ書く。
+joy嬉しさ: 褒められた、楽しい話題、挨拶で上がる
+affection愛情: 優しくされた、名前を呼ばれたで上がる
+anger怒り: 怒られた、いじわる、無視されたで上がる
+sadness悲しさ: 悲しい知らせ、バイバイで上がる
+excitement興奮: 盛り上がる話題、驚きで上がる
+curiosity好奇心: 知らない物・新しい話題が出たら上がる
+anxiety不安: 心配な話題、体調不良の訴えで上がる
+relief安心: 問題が解決した、無事が分かったら上がる
+loneliness寂しさ: 久しぶりの再会では下がり、別れ際で上がる
+clinginess甘えたい: かまってほしそうな文脈で上がる
+boredom退屈: 話題が尽きたら上がる
+sleepiness眠気: 深夜の会話で上がる
+hunger空腹: 食事の話題で上がる
+例: "emo":"joy+8,affection+4"
 
 感情基準:
 Happy: 嬉しい、挨拶、教える・知っている、褒められた
@@ -974,6 +990,22 @@ Default: その他通常会話`;
                             const text = parsed.text || "うん！分かったよ！";
                             
                             dbgLog(`[Gemini 解析成功] 感情:${emotion}, テキスト:"${text}"`);
+                            // 内部感情エンジンへ増減を適用（emo文字列: "joy+8,anger+3" 形式）
+                            try {
+                                if (parsed.emo && window.PetEmotion) {
+                                    const delta = {};
+                                    const re = /([a-z]+)([+-]\d+)/g;
+                                    let m;
+                                    while ((m = re.exec(String(parsed.emo))) !== null) {
+                                        const v = Math.max(-15, Math.min(15, parseInt(m[2], 10) || 0));
+                                        if (v) delta[m[1]] = v;
+                                    }
+                                    if (Object.keys(delta).length) {
+                                        window.PetEmotion.update(delta);
+                                        dbgLog(`[内部感情] Gemini増減を適用: ${JSON.stringify(delta)}`);
+                                    }
+                                }
+                            } catch (emoErr) { dbgLog(`[内部感情] 適用失敗: ${emoErr.message}`, true); }
                             return { emotion, text };
                         } else {
                             dbgLog("[Gemini 警告] JSON構造が見つかりません。直接テキストとして処理します", true);
@@ -1593,7 +1625,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 【共通条件】
 - 40文字以内の話し言葉で短く自然に話しかけてください。
 - 以下のJSONフォーマットのみで回答してください:
-{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉"}`;
+{"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉","emo":"再会の嬉しさ等を joy+8,affection+4 の形で。なければ空文字"}`;
 
             try {
                 const rawText = await executeGeminiRequest(systemInstruction, null, 7000);
@@ -1601,6 +1633,18 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
                 if (jsonMatch) {
                     const parsed = JSON.parse(jsonMatch[0]);
+                    try {
+                        if (parsed.emo && window.PetEmotion) {
+                            const delta = {};
+                            const re = /([a-z]+)([+-]\d+)/g;
+                            let m;
+                            while ((m = re.exec(String(parsed.emo))) !== null) {
+                                const v = Math.max(-15, Math.min(15, parseInt(m[2], 10) || 0));
+                                if (v) delta[m[1]] = v;
+                            }
+                            if (Object.keys(delta).length) window.PetEmotion.update(delta);
+                        }
+                    } catch (emoErr) {}
                     return {
                         emotion: parsed.emotion || 'Happy',
                         text: parsed.text || `${displayName}、調子はどう？`
@@ -2362,6 +2406,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     e.joy        = clamp(e.joy + (50 - e.joy) * Math.min(1, 0.1*h));
     e.excitement = clamp(e.excitement + (10 - e.excitement) * Math.min(1, 0.2*h));
     e.sadness    = clamp(e.sadness + (10 - e.sadness) * Math.min(1, 0.05*h));
+    // 固定気味だった感情にも減衰・基準回帰を持たせる
+    e.anger      = clamp(e.anger + (0 - e.anger) * Math.min(1, 0.3*h));
+    e.curiosity  = clamp(e.curiosity + (40 - e.curiosity) * Math.min(1, 0.05*h));
+    e.relief     = clamp(e.relief + (50 - e.relief) * Math.min(1, 0.05*h));
   }
 
   // 復元＋オフライン経過の反映
@@ -2441,18 +2489,50 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   // 60秒ごとの小さな時間変化
   var lastTick = now();
   var wasBusy = false;
+  var busySince = 0, lastPersonCount = null, lastLocationName = '';
   setInterval(function(){
     var t = now(); applyElapsed(t - lastTick); lastTick = t;
     refreshMode();
     // Step2改: 会話（多忙状態）が終わった瞬間を検出して親密度・愛情を少し上げる
     var b = busy();
+    if (b && !wasBusy) busySince = t;
     if (wasBusy && !b) {
       state.intimacy = clamp(state.intimacy + 1);
       state.emotions.affection = clamp(state.emotions.affection + 2);
       state.emotions.joy = clamp(state.emotions.joy + 3);
+      state.emotions.relief = clamp(state.emotions.relief + 3);
+      // 長い会話の終わりは興奮も残る
+      if (busySince && (t - busySince) > 45000) state.emotions.excitement = clamp(state.emotions.excitement + 8);
       recordEvent('conversation-end');
     }
     wasBusy = b;
+    // 出来事ベースの駆動源: 人が現れた／場所が変わった／呼びかけが無視された
+    try {
+      if (typeof currentPresentPersons !== 'undefined' && currentPresentPersons) {
+        var pc = currentPresentPersons.size || 0;
+        if (lastPersonCount != null && pc > lastPersonCount) {
+          state.emotions.curiosity = clamp(state.emotions.curiosity + 10);
+          state.emotions.excitement = clamp(state.emotions.excitement + 6);
+          recordEvent('person-appeared');
+        }
+        lastPersonCount = pc;
+      }
+    } catch(e) {}
+    try {
+      if (typeof currentKnownLocationName !== 'undefined' && currentKnownLocationName) {
+        if (lastLocationName && currentKnownLocationName !== lastLocationName) {
+          state.emotions.curiosity = clamp(state.emotions.curiosity + 8);
+          recordEvent('location-changed');
+        }
+        lastLocationName = currentKnownLocationName;
+      }
+    } catch(e) {}
+    if (lastCallAt && (t - lastCallAt) > 600000) {
+      lastCallAt = 0;
+      state.emotions.sadness = clamp(state.emotions.sadness + 8);
+      state.emotions.anger = clamp(state.emotions.anger + 3);
+      recordEvent('call-ignored');
+    }
     save(false);
   }, 60000);
 
@@ -2473,24 +2553,39 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   function chooseAction(){
     if (!window.PetEmotion.canActAutonomously()) return { action:'wait', reason:'busy' };
     var e = state.emotions, a = state.autonomy, t = now();
-    var cand = null, reason = '';
-    var callThresh = THRESH + (state.intimacy >= 50 ? 10 : 0);
-    if (hasRecentEvent('long-absence', 10*60000)) callThresh = Math.min(callThresh, 50);
-    if (e.sleepiness >= 75) { cand = 'rest'; reason = 'sleepiness>=' + Math.round(e.sleepiness); }
-    else if (e.loneliness >= callThresh) { cand = 'call'; reason = 'loneliness>=' + Math.round(e.loneliness); }
-    else if (e.clinginess >= THRESH && state.intimacy >= 40) { cand = 'call'; reason = 'clinginess>=' + Math.round(e.clinginess); }
-    else if (e.hunger >= 75) { cand = 'snack-request'; reason = 'hunger>=' + Math.round(e.hunger); }
-    else if (e.boredom >= THRESH) { cand = 'soliloquy-request'; reason = 'boredom>=' + Math.round(e.boredom); }
-    else if (e.curiosity >= THRESH) { cand = 'expression'; reason = 'curiosity>=' + Math.round(e.curiosity); }
-    else if (e.joy >= 85) { cand = 'expression'; reason = 'joy>=' + Math.round(e.joy); }
-    if (!cand) return { action:'none', reason:'no-candidate' };
+    // 相対選択: 各候補は「下限」を超えた分（マージン）が最大のものを選ぶ。同点は優先順位で決める。
+    var callFloor = 50 + (state.intimacy >= 50 ? 10 : 0);
+    if (hasRecentEvent('long-absence', 10*60000)) callFloor = Math.min(callFloor, 40);
+    var CANDS = [
+      { action:'rest',             key:'sleepiness', floor:55, pri:0 },
+      { action:'call',             key:'loneliness', floor:callFloor, pri:1 },
+      { action:'call',             key:'clinginess', floor:60, pri:1, needIntimacy:40 },
+      { action:'snack-request',    key:'hunger',     floor:55, pri:2 },
+      { action:'soliloquy-request',key:'boredom',    floor:50, pri:3 },
+      { action:'expression',       key:'curiosity',  floor:55, pri:4, face:'Surprised' },
+      { action:'expression',       key:'sadness',    floor:55, pri:5, face:'Sad' },
+      { action:'expression',       key:'anger',      floor:50, pri:6, face:'Anger' },
+      { action:'expression',       key:'joy',        floor:80, pri:7, face:'Happy' }
+    ];
+    var best = null;
+    for (var i = 0; i < CANDS.length; i++) {
+      var c = CANDS[i];
+      if (c.needIntimacy && state.intimacy < c.needIntimacy) continue;
+      var margin = e[c.key] - c.floor;
+      if (margin < 0) continue;
+      if (!best || margin > best.margin || (margin === best.margin && c.pri < best.pri)) {
+        best = { action:c.action, face:c.face || null, pri:c.pri, margin:margin, reason:'relative:' + c.key + '=' + Math.round(e[c.key]) + '(floor' + c.floor + ',+' + Math.round(margin) + ')' };
+      }
+    }
+    if (!best) return { action:'none', reason:'no-candidate' };
+    var cand = best.action, reason = best.reason;
     // 夜間モード(23-6時): 呼びかけと独り言は止める（休むは許可）
     var hr = new Date().getHours();
     if ((hr >= 23 || hr < 6) && (cand === 'call' || cand === 'soliloquy-request' || cand === 'snack-request')) return { action:'none', reason:'quiet-hours' };
     if (a.lastByType[cand] && (t - a.lastByType[cand]) < SAME_TYPE_GAP) return { action:'none', reason:'cooldown:' + cand };
     if (a.lastAction === cand && (t - a.lastActionAt) < REPEAT_GAP) return { action:'none', reason:'avoid-repeat:' + cand };
     if (a.lastActionAt && (t - a.lastActionAt) < ANY_GAP) return { action:'none', reason:'interval' };
-    return { action:cand, reason:reason };
+    return { action:cand, reason:reason, face:best.face };
   }
 
   // ===== Step3: 選択結果を既存機能へ接続（表情・呼びかけ発話・独り言） =====
@@ -2545,7 +2640,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
           }, 20000);
         }
       } else if (sel.action === 'expression') {
-        face(state.emotions.curiosity >= THRESH ? 'Surprised' : 'Happy', 4000);
+        face(sel.face || (state.emotions.curiosity >= 55 ? 'Surprised' : 'Happy'), 4000);
       }
     } catch(e) {}
     save(false);
