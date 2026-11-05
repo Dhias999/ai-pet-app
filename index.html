@@ -1140,7 +1140,7 @@ Default: その他通常会話`;
                     const savedDescriptor = pendingFaceDescriptor;
                     pendingFaceDescriptor = null;
                     
-                    const transcriptClean = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
+                    const transcriptClean = cleanNameEnd(rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim());
                     const denyKeywords = ['違う', 'ううん', 'いや', 'いいえ', 'やめる', 'キャンセル', 'ちがう'];
                     const isDenied = denyKeywords.some(keyword => transcriptClean.includes(keyword));
 
@@ -1154,7 +1154,7 @@ Default: その他通常会話`;
                     let extractedName = transcriptClean.replace(/(だよ|です|だ|よ|ー|～|！|!|？|\?)+$/g, '').trim();
                     if (!extractedName) extractedName = transcriptClean;
 
-                    const personName = extractedName;
+                    const personName = cleanNameEnd(extractedName);
                     const speakName = getDisplayName(personName);
 
                     savePersonToVault(personName, savedDescriptor).then(() => {
@@ -1178,7 +1178,7 @@ Default: その他通常会話`;
                     const savedCoords = pendingLocationCoords;
                     pendingLocationCoords = null;
 
-                    const locationName = rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim();
+                    const locationName = cleanNameEnd(rawTranscript.replace(/[\\/:*?"<>|]/g, '').trim());
 
                     speak(`「${locationName}」だね。覚えたよ！`, async () => {
                         await saveLocationToVault(locationName, savedCoords);
@@ -1479,6 +1479,11 @@ Default: その他通常会話`;
             dbgLog("待機アニメーション（まばたき・視線移動）開始");
         }
 
+        // 名前（人物・場所）の末尾に付いた句読点（音声認識が付ける「。」等）を取り除く
+        function cleanNameEnd(s) {
+            return (s || '').replace(/[。．、,.！!？?\s]+$/g, '');
+        }
+
         async function saveEpisodeToVault(episodeTitle, contentText, locationName, personNames = []) {
             if (!vaultDirHandle) return;
 
@@ -1491,11 +1496,11 @@ Default: その他通常会話`;
             episodeBlock += `### [${timeStr}] ${episodeTitle}\n`;
             
             if (locationName) {
-                episodeBlock += `**場所**: [[${locationName}]]  \n`;
+                episodeBlock += `**場所**: [[${cleanNameEnd(locationName)}]]  \n`;
             }
 
             if (personNames && personNames.length > 0) {
-                const personLinks = personNames.map(name => `[[${name}]]`).join(', ');
+                const personLinks = personNames.map(name => `[[${cleanNameEnd(name)}]]`).join(', ');
                 episodeBlock += `**一緒にいた人**: ${personLinks}  \n`;
             }
             
