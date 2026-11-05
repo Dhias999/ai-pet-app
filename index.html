@@ -951,7 +951,7 @@ ${contextText}
 フォーマット:
 {"emotion":"Happy|Anger|Surprised|Sad|Default","text":"40文字以内の話し言葉","emo":"内部感情の増減を key+数値 の形でカンマ区切り。変化がなければ空文字"}
 
-内部感情(emo)の基準: 各値は-15〜+15。変化したものだけ書く。
+内部感情(emo)の基準: 各値は-30〜+30。感情は大きく動かしてよい。変化したものだけ書く。
 joy嬉しさ: 褒められた、楽しい話題、挨拶で上がる
 affection愛情: 優しくされた、名前を呼ばれたで上がる
 anger怒り: 怒られた、いじわる、無視されたで上がる
@@ -965,7 +965,7 @@ clinginess甘えたい: かまってほしそうな文脈で上がる
 boredom退屈: 話題が尽きたら上がる
 sleepiness眠気: 深夜の会話で上がる
 hunger空腹: 食事の話題で上がる
-例: "emo":"joy+8,affection+4"
+例: "emo":"joy+15,affection+8"
 
 感情基準:
 Happy: 嬉しい、挨拶、教える・知っている、褒められた
@@ -997,7 +997,7 @@ Default: その他通常会話`;
                                     const re = /([a-z]+)([+-]\d+)/g;
                                     let m;
                                     while ((m = re.exec(String(parsed.emo))) !== null) {
-                                        const v = Math.max(-15, Math.min(15, parseInt(m[2], 10) || 0));
+                                        const v = Math.max(-30, Math.min(30, parseInt(m[2], 10) || 0));
                                         if (v) delta[m[1]] = v;
                                     }
                                     if (Object.keys(delta).length) {
@@ -1639,7 +1639,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                             const re = /([a-z]+)([+-]\d+)/g;
                             let m;
                             while ((m = re.exec(String(parsed.emo))) !== null) {
-                                const v = Math.max(-15, Math.min(15, parseInt(m[2], 10) || 0));
+                                const v = Math.max(-30, Math.min(30, parseInt(m[2], 10) || 0));
                                 if (v) delta[m[1]] = v;
                             }
                             if (Object.keys(delta).length) window.PetEmotion.update(delta);
@@ -2391,23 +2391,23 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     if (!ms || ms <= 0) return;
     var h = Math.min(ms / 3600000, 24); // 一度に最大24時間分まで
     var e = state.emotions;
-    e.loneliness = clamp(e.loneliness + 9*h);
-    e.boredom     = clamp(e.boredom + 6*h);
-    e.clinginess = clamp(e.clinginess + 1.5*h);
-    e.hunger     = clamp(e.hunger + 8*h);
+    e.loneliness = clamp(e.loneliness + 14*h);
+    e.boredom     = clamp(e.boredom + 10*h);
+    e.clinginess = clamp(e.clinginess + 3*h);
+    e.hunger     = clamp(e.hunger + 12*h);
     // 生活リズム: 夜(22-5時)は眠気が増えやすく、朝(6-10時)は基準へ戻りやすい
     var hour = new Date().getHours();
     if (hour >= 22 || hour < 5) e.sleepiness = clamp(e.sleepiness + 5*h);
     else if (hour >= 6 && hour < 10) e.sleepiness = clamp(e.sleepiness + (10 - e.sleepiness) * Math.min(1, 0.15*h));
     else e.sleepiness = clamp(e.sleepiness + 2*h);
-    e.anxiety    = clamp(e.anxiety + 0.5*h);
+    e.anxiety    = clamp(e.anxiety + 2*h);
     e.affection  = clamp(e.affection - 0.5*h);
     // 嬉しさ・興奮は基準値へ徐々に減衰
-    e.joy        = clamp(e.joy + (50 - e.joy) * Math.min(1, 0.1*h));
-    e.excitement = clamp(e.excitement + (10 - e.excitement) * Math.min(1, 0.2*h));
-    e.sadness    = clamp(e.sadness + (10 - e.sadness) * Math.min(1, 0.05*h));
+    e.joy        = clamp(e.joy + (50 - e.joy) * Math.min(1, 0.2*h));
+    e.excitement = clamp(e.excitement + (10 - e.excitement) * Math.min(1, 0.35*h));
+    e.sadness    = clamp(e.sadness + (10 - e.sadness) * Math.min(1, 0.12*h));
     // 固定気味だった感情にも減衰・基準回帰を持たせる
-    e.anger      = clamp(e.anger + (0 - e.anger) * Math.min(1, 0.3*h));
+    e.anger      = clamp(e.anger + (0 - e.anger) * Math.min(1, 0.15*h));
     e.curiosity  = clamp(e.curiosity + (40 - e.curiosity) * Math.min(1, 0.05*h));
     e.relief     = clamp(e.relief + (50 - e.relief) * Math.min(1, 0.05*h));
   }
@@ -2479,10 +2479,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     // Step2改: 交流10回ごとに親密度+1（少しずつ育つ）
     if (state.experience.interactions % 10 === 0) state.intimacy = clamp(state.intimacy + 1);
     var e = state.emotions;
-    e.loneliness = clamp(e.loneliness - 5);
-    e.boredom = clamp(e.boredom - 5);
-    e.clinginess = clamp(e.clinginess - 2);
-    e.joy = clamp(e.joy + 2);
+    e.loneliness = clamp(e.loneliness - 8);
+    e.boredom = clamp(e.boredom - 8);
+    e.clinginess = clamp(e.clinginess - 3);
+    e.joy = clamp(e.joy + 4);
     save(false);
   }
 
@@ -2498,11 +2498,11 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     if (b && !wasBusy) busySince = t;
     if (wasBusy && !b) {
       state.intimacy = clamp(state.intimacy + 1);
-      state.emotions.affection = clamp(state.emotions.affection + 2);
-      state.emotions.joy = clamp(state.emotions.joy + 3);
-      state.emotions.relief = clamp(state.emotions.relief + 3);
+      state.emotions.affection = clamp(state.emotions.affection + 4);
+      state.emotions.joy = clamp(state.emotions.joy + 6);
+      state.emotions.relief = clamp(state.emotions.relief + 6);
       // 長い会話の終わりは興奮も残る
-      if (busySince && (t - busySince) > 45000) state.emotions.excitement = clamp(state.emotions.excitement + 8);
+      if (busySince && (t - busySince) > 45000) state.emotions.excitement = clamp(state.emotions.excitement + 15);
       recordEvent('conversation-end');
     }
     wasBusy = b;
@@ -2511,8 +2511,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
       if (typeof currentPresentPersons !== 'undefined' && currentPresentPersons) {
         var pc = currentPresentPersons.size || 0;
         if (lastPersonCount != null && pc > lastPersonCount) {
-          state.emotions.curiosity = clamp(state.emotions.curiosity + 10);
-          state.emotions.excitement = clamp(state.emotions.excitement + 6);
+          state.emotions.curiosity = clamp(state.emotions.curiosity + 18);
+          state.emotions.excitement = clamp(state.emotions.excitement + 12);
           recordEvent('person-appeared');
         }
         lastPersonCount = pc;
@@ -2521,7 +2521,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     try {
       if (typeof currentKnownLocationName !== 'undefined' && currentKnownLocationName) {
         if (lastLocationName && currentKnownLocationName !== lastLocationName) {
-          state.emotions.curiosity = clamp(state.emotions.curiosity + 8);
+          state.emotions.curiosity = clamp(state.emotions.curiosity + 15);
           recordEvent('location-changed');
         }
         lastLocationName = currentKnownLocationName;
@@ -2529,8 +2529,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     } catch(e) {}
     if (lastCallAt && (t - lastCallAt) > 600000) {
       lastCallAt = 0;
-      state.emotions.sadness = clamp(state.emotions.sadness + 8);
-      state.emotions.anger = clamp(state.emotions.anger + 3);
+      state.emotions.sadness = clamp(state.emotions.sadness + 15);
+      state.emotions.anger = clamp(state.emotions.anger + 8);
       recordEvent('call-ignored');
     }
     save(false);
@@ -2567,25 +2567,29 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
       { action:'expression',       key:'anger',      floor:50, pri:6, face:'Anger' },
       { action:'expression',       key:'joy',        floor:80, pri:7, face:'Happy' }
     ];
-    var best = null;
+    var scored = [];
     for (var i = 0; i < CANDS.length; i++) {
       var c = CANDS[i];
       if (c.needIntimacy && state.intimacy < c.needIntimacy) continue;
       var margin = e[c.key] - c.floor;
       if (margin < 0) continue;
-      if (!best || margin > best.margin || (margin === best.margin && c.pri < best.pri)) {
-        best = { action:c.action, face:c.face || null, pri:c.pri, margin:margin, reason:'relative:' + c.key + '=' + Math.round(e[c.key]) + '(floor' + c.floor + ',+' + Math.round(margin) + ')' };
-      }
+      scored.push({ action:c.action, face:c.face || null, pri:c.pri, margin:margin, reason:'relative:' + c.key + '=' + Math.round(e[c.key]) + '(floor' + c.floor + ',+' + Math.round(margin) + ')' });
     }
-    if (!best) return { action:'none', reason:'no-candidate' };
-    var cand = best.action, reason = best.reason;
-    // 夜間モード(23-6時): 呼びかけと独り言は止める（休むは許可）
-    var hr = new Date().getHours();
-    if ((hr >= 23 || hr < 6) && (cand === 'call' || cand === 'soliloquy-request' || cand === 'snack-request')) return { action:'none', reason:'quiet-hours' };
-    if (a.lastByType[cand] && (t - a.lastByType[cand]) < SAME_TYPE_GAP) return { action:'none', reason:'cooldown:' + cand };
-    if (a.lastAction === cand && (t - a.lastActionAt) < REPEAT_GAP) return { action:'none', reason:'avoid-repeat:' + cand };
+    if (!scored.length) return { action:'none', reason:'no-candidate' };
+    scored.sort(function(x, y){ return (y.margin - x.margin) || (x.pri - y.pri); });
+    // 自律行動全体の最小間隔は全候補共通の条件
     if (a.lastActionAt && (t - a.lastActionAt) < ANY_GAP) return { action:'none', reason:'interval' };
-    return { action:cand, reason:reason, face:best.face };
+    // 夜間・クールダウン等でブロックされた候補は飛ばし、次の候補へ落とす
+    var hr = new Date().getHours();
+    var quiet = (hr >= 23 || hr < 6);
+    for (var j = 0; j < scored.length; j++) {
+      var cand = scored[j];
+      if (quiet && (cand.action === 'call' || cand.action === 'soliloquy-request' || cand.action === 'snack-request')) continue;
+      if (a.lastByType[cand.action] && (t - a.lastByType[cand.action]) < SAME_TYPE_GAP) continue;
+      if (a.lastAction === cand.action && (t - a.lastActionAt) < REPEAT_GAP) continue;
+      return { action:cand.action, reason:cand.reason, face:cand.face };
+    }
+    return { action:'none', reason:'all-blocked' };
   }
 
   // ===== Step3: 選択結果を既存機能へ接続（表情・呼びかけ発話・独り言） =====
@@ -2688,8 +2692,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     snackBtn.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99997;padding:12px 16px;border:0;border-radius:999px;background:#e17055;color:#fff;font-weight:bold;font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,0.35);';
     snackBtn.addEventListener('click', function(ev){
       state.emotions.hunger = clamp(state.emotions.hunger - 60);
-      state.emotions.joy = clamp(state.emotions.joy + 8);
-      state.emotions.affection = clamp(state.emotions.affection + 2);
+      state.emotions.joy = clamp(state.emotions.joy + 12);
+      state.emotions.affection = clamp(state.emotions.affection + 3);
       state.experience.meals += 1;
       recordEvent('fed');
       face('Happy', 3000);
@@ -2718,9 +2722,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         petAcc += Math.abs(ev.clientX - petLastX) + Math.abs(ev.clientY - petLastY);
         if (petAcc > 300 && (now() - petLastAt) > 600) {
           petAcc = 0; petLastAt = now();
-          state.emotions.affection = clamp(state.emotions.affection + 2);
-          state.emotions.joy = clamp(state.emotions.joy + 3);
-          state.emotions.clinginess = clamp(state.emotions.clinginess - 2);
+          state.emotions.affection = clamp(state.emotions.affection + 4);
+          state.emotions.joy = clamp(state.emotions.joy + 6);
+          state.emotions.clinginess = clamp(state.emotions.clinginess - 3);
           recordEvent('petted');
           face('Happy', 2500);
           floatEmoji('💗', ev.clientX, ev.clientY);
