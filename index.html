@@ -2301,17 +2301,18 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 // 既存機能（Gemini会話・音声入力・呼びかけ待ち受け等）のコード自体は変更しない。
 // Step1: 状態保持とAPI公開 / Step2: 行動選択 chooseAction / Step3: 独り言・表情・呼びかけへの接続
 // Step4: 経験（交流回数・活動日数・直近イベント）の記録と選択への反映。
+// 番外編 (feature/android-free-ideas): 空腹度となでなで、おやつボタン、バッテリー連動、記念日反応を追加。
 (function () {
   'use strict';
   var KEY = 'aiPetEmotionStateV1'; // 既存キー ai_pet_wake_name / gemini_api_key とは別
-  var EMOTIONS = ['joy','loneliness','affection','anger','anxiety','relief','curiosity','sleepiness','boredom','clinginess','sadness','excitement'];
+  var EMOTIONS = ['joy','loneliness','affection','anger','anxiety','relief','curiosity','sleepiness','boredom','clinginess','sadness','excitement','hunger'];
   // joy=嬉しさ loneliness=寂しさ affection=愛情 anger=怒り anxiety=不安 relief=安心
   // curiosity=好奇心 sleepiness=眠気 boredom=退屈 clinginess=甘えたい sadness=悲しさ excitement=興奮
-  var BASE = { joy:50, loneliness:20, affection:30, anger:0, anxiety:10, relief:50, curiosity:40, sleepiness:20, boredom:20, clinginess:20, sadness:10, excitement:20 };
+  var BASE = { joy:50, loneliness:20, affection:30, anger:0, anxiety:10, relief:50, curiosity:40, sleepiness:20, boredom:20, clinginess:20, sadness:10, excitement:20, hunger:20 };
   function clamp(v){ v = Number(v); return isNaN(v) ? 0 : Math.max(0, Math.min(100, v)); }
   function now(){ return Date.now(); }
   var state = { emotions:{}, intimacy:20, mode:'idle', lastInteractionAt:now(), savedAt:now(),
-    experience:{ interactions:0, activeDays:0, lastVisitDate:'', sessions:0, events:[] },
+    experience:{ interactions:0, activeDays:0, lastVisitDate:'', sessions:0, events:[], meals:0 },
     autonomy:{ lastAction:'none', lastActionAt:0, lastByType:{}, current:{ action:'none', reason:'init' } } };
   function recordEvent(type){
     try {
@@ -2349,6 +2350,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     e.loneliness = clamp(e.loneliness + 9*h);
     e.boredom     = clamp(e.boredom + 6*h);
     e.clinginess = clamp(e.clinginess + 1.5*h);
+    e.hunger     = clamp(e.hunger + 8*h);
     // 生活リズム: 夜(22-5時)は眠気が増えやすく、朝(6-10時)は基準へ戻りやすい
     var hour = new Date().getHours();
     if (hour >= 22 || hour < 5) e.sleepiness = clamp(e.sleepiness + 5*h);
@@ -2375,6 +2377,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         if (s.experience.activeDays != null) state.experience.activeDays = s.experience.activeDays|0;
         if (s.experience.lastVisitDate) state.experience.lastVisitDate = s.experience.lastVisitDate;
         if (s.experience.sessions != null) state.experience.sessions = s.experience.sessions|0;
+        if (s.experience.meals != null) state.experience.meals = s.experience.meals|0;
         if (Array.isArray(s.experience.events)) state.experience.events = s.experience.events.slice(-20);
       }
       if (s && s.autonomy) {
@@ -2476,13 +2479,14 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     if (e.sleepiness >= 75) { cand = 'rest'; reason = 'sleepiness>=' + Math.round(e.sleepiness); }
     else if (e.loneliness >= callThresh) { cand = 'call'; reason = 'loneliness>=' + Math.round(e.loneliness); }
     else if (e.clinginess >= THRESH && state.intimacy >= 40) { cand = 'call'; reason = 'clinginess>=' + Math.round(e.clinginess); }
+    else if (e.hunger >= 75) { cand = 'snack-request'; reason = 'hunger>=' + Math.round(e.hunger); }
     else if (e.boredom >= THRESH) { cand = 'soliloquy-request'; reason = 'boredom>=' + Math.round(e.boredom); }
     else if (e.curiosity >= THRESH) { cand = 'expression'; reason = 'curiosity>=' + Math.round(e.curiosity); }
     else if (e.joy >= 85) { cand = 'expression'; reason = 'joy>=' + Math.round(e.joy); }
     if (!cand) return { action:'none', reason:'no-candidate' };
     // 夜間モード(23-6時): 呼びかけと独り言は止める（休むは許可）
     var hr = new Date().getHours();
-    if ((hr >= 23 || hr < 6) && (cand === 'call' || cand === 'soliloquy-request')) return { action:'none', reason:'quiet-hours' };
+    if ((hr >= 23 || hr < 6) && (cand === 'call' || cand === 'soliloquy-request' || cand === 'snack-request')) return { action:'none', reason:'quiet-hours' };
     if (a.lastByType[cand] && (t - a.lastByType[cand]) < SAME_TYPE_GAP) return { action:'none', reason:'cooldown:' + cand };
     if (a.lastAction === cand && (t - a.lastActionAt) < REPEAT_GAP) return { action:'none', reason:'avoid-repeat:' + cand };
     if (a.lastActionAt && (t - a.lastActionAt) < ANY_GAP) return { action:'none', reason:'interval' };
@@ -2512,6 +2516,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         if (typeof speak === 'function') speak(line, function(){ face('Default', 0); });
         else face('Default', 4000);
         state.emotions.clinginess = clamp(state.emotions.clinginess - 5);
+      } else if (sel.action === 'snack-request') {
+        face('Sad', 0);
+        if (typeof speak === 'function') speak('おなかすいちゃった', function(){ face('Default', 0); });
+        else face('Default', 4000);
       } else if (sel.action === 'soliloquy-request') {
         // 既存の独り言（環境観察）。向こう側にも多忙ガードとカメラ変化の条件がある。
         var beforeSpeech = '';
@@ -2564,6 +2572,105 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     getCurrentAction: function(){ return JSON.parse(JSON.stringify(state.autonomy.current)); }
   };
 
+  // ===== 番外編: Android向け自由アイデア =====
+  // ハート等の小さな浮遊演出
+  function floatEmoji(txt, x, y){
+    try {
+      var el = document.createElement('div');
+      el.textContent = txt;
+      el.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;font-size:26px;z-index:99998;pointer-events:none;transition:all 1.1s ease-out;opacity:1;';
+      document.body.appendChild(el);
+      requestAnimationFrame(function(){ el.style.top = (y - 70) + 'px'; el.style.opacity = '0'; });
+      setTimeout(function(){ try { el.remove(); } catch(e) {} }, 1200);
+    } catch(e) {}
+  }
+
+  // おやつボタン（右下固定）: 空腹を下げて喜ばせる
+  try {
+    var snackBtn = document.createElement('button');
+    snackBtn.type = 'button';
+    snackBtn.textContent = '🍪 おやつ';
+    snackBtn.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99997;padding:12px 16px;border:0;border-radius:999px;background:#e17055;color:#fff;font-weight:bold;font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,0.35);';
+    snackBtn.addEventListener('click', function(ev){
+      state.emotions.hunger = clamp(state.emotions.hunger - 60);
+      state.emotions.joy = clamp(state.emotions.joy + 8);
+      state.emotions.affection = clamp(state.emotions.affection + 2);
+      state.experience.meals += 1;
+      recordEvent('fed');
+      face('Happy', 3000);
+      floatEmoji('🍪', ev.clientX || (window.innerWidth - 60), ev.clientY || (window.innerHeight - 60));
+      if (typeof speak === 'function' && window.PetEmotion.canActAutonomously()) speak('もぐもぐ、おいしい');
+      save(false);
+    });
+    document.body.appendChild(snackBtn);
+  } catch(e) {}
+
+  // なでなで検出: 顔のあたりを指でこすったら1ストロークとして反応する
+  var petAcc = 0, petLastX = null, petLastY = null, petLastAt = 0;
+  window.addEventListener('pointermove', function(ev){
+    try {
+      if (ev.pointerType !== 'touch' && !(ev.buttons & 1)) return;
+      var faceEl = document.getElementById('faceGroup');
+      var inFace = false;
+      if (faceEl && faceEl.getBoundingClientRect) {
+        var r = faceEl.getBoundingClientRect();
+        inFace = ev.clientX >= r.left - 20 && ev.clientX <= r.right + 20 && ev.clientY >= r.top - 20 && ev.clientY <= r.bottom + 20;
+      } else {
+        inFace = ev.clientY < window.innerHeight * 0.6;
+      }
+      if (!inFace) { petLastX = null; return; }
+      if (petLastX != null) {
+        petAcc += Math.abs(ev.clientX - petLastX) + Math.abs(ev.clientY - petLastY);
+        if (petAcc > 300 && (now() - petLastAt) > 600) {
+          petAcc = 0; petLastAt = now();
+          state.emotions.affection = clamp(state.emotions.affection + 2);
+          state.emotions.joy = clamp(state.emotions.joy + 3);
+          state.emotions.clinginess = clamp(state.emotions.clinginess - 2);
+          recordEvent('petted');
+          face('Happy', 2500);
+          floatEmoji('💗', ev.clientX, ev.clientY);
+          save(false);
+        }
+      }
+      petLastX = ev.clientX; petLastY = ev.clientY;
+    } catch(e) {}
+  }, { passive:true });
+
+  // バッテリー連動 (Android Chrome: navigator.getBattery)
+  try {
+    if (navigator.getBattery) {
+      navigator.getBattery().then(function(batt){
+        var lowWarnedAt = 0;
+        var checkBatt = function(){
+          if (batt.charging) { state.emotions.relief = clamp(state.emotions.relief + 3); }
+          else if (batt.level <= 0.2 && (now() - lowWarnedAt) > 3600000) {
+            lowWarnedAt = now();
+            state.emotions.anxiety = clamp(state.emotions.anxiety + 10);
+            recordEvent('battery-low');
+            face('Surprised', 3000);
+          }
+          save(false);
+        };
+        batt.addEventListener('levelchange', checkBatt);
+        batt.addEventListener('chargingchange', checkBatt);
+        checkBatt();
+      }).catch(function(){});
+    }
+  } catch(e) {}
+
+  // 記念日反応: 活動日数が節目の日に喜ぶ
+  try {
+    if ([7, 30, 100, 365].indexOf(state.experience.activeDays) >= 0 && hasRecentEvent('visit', 60000)) {
+      // 起動直後の訪問イベントがある＝今日が節目の初回起動として扱う（activeDaysは日付が変わった時に増える）
+      var key = 'milestone' + state.experience.activeDays;
+      if (!hasRecentEvent(key, 24*3600000)) {
+        recordEvent(key);
+        state.emotions.joy = clamp(state.emotions.joy + 20);
+        setTimeout(function(){ face('Happy', 5000); }, 3000);
+      }
+    }
+  } catch(e) {}
+
   // ===== ウェイクワード待機のウォッチドッグ =====
   // 待機モードONなのに認識インスタンスが無い状態が続いたら、既存の開始関数を呼び直す。
   // 既存側の自動再開（onend後0.9秒）で復旧しなかった場合の保険。権限エラー時は既存側がモードを切るので干渉しない。
@@ -2584,7 +2691,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   // ?debug=1 の時だけ画面左上に感情状態を小さく表示する。通常時は要素を作らず動作に影響しない。
   try {
     if (new URLSearchParams(location.search).get('debug') === '1') {
-      var LABELS = { joy:'嬉しさ', loneliness:'寂しさ', affection:'愛情', anger:'怒り', anxiety:'不安', relief:'安心', curiosity:'好奇心', sleepiness:'眠気', boredom:'退屈', clinginess:'甘えたい', sadness:'悲しさ', excitement:'興奮' };
+      var LABELS = { joy:'嬉しさ', loneliness:'寂しさ', affection:'愛情', anger:'怒り', anxiety:'不安', relief:'安心', curiosity:'好奇心', sleepiness:'眠気', boredom:'退屈', clinginess:'甘えたい', sadness:'悲しさ', excitement:'興奮', hunger:'空腹' };
       var box = document.createElement('div');
       box.id = 'petEmotionDebug';
       box.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.75);color:#fff;font:11px/1.5 monospace;padding:8px 10px;border-radius:8px;pointer-events:none;white-space:pre;';
