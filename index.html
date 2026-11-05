@@ -2349,7 +2349,11 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     e.loneliness = clamp(e.loneliness + 9*h);
     e.boredom     = clamp(e.boredom + 6*h);
     e.clinginess = clamp(e.clinginess + 1.5*h);
-    e.sleepiness = clamp(e.sleepiness + 2*h);
+    // 生活リズム: 夜(22-5時)は眠気が増えやすく、朝(6-10時)は基準へ戻りやすい
+    var hour = new Date().getHours();
+    if (hour >= 22 || hour < 5) e.sleepiness = clamp(e.sleepiness + 5*h);
+    else if (hour >= 6 && hour < 10) e.sleepiness = clamp(e.sleepiness + (10 - e.sleepiness) * Math.min(1, 0.15*h));
+    else e.sleepiness = clamp(e.sleepiness + 2*h);
     e.anxiety    = clamp(e.anxiety + 0.5*h);
     e.affection  = clamp(e.affection - 0.5*h);
     // 嬉しさ・興奮は基準値へ徐々に減衰
@@ -2409,10 +2413,20 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     try { if (typeof isSleeping !== 'undefined' && isSleeping) { state.mode = 'rest'; return; } } catch(e) {}
     state.mode = busy() ? 'conversation' : 'idle';
   }
+  var lastCallAt = 0; // 直近の自律呼びかけ時刻（応答判定用）
   function onInteraction(){
     state.lastInteractionAt = now();
     state.experience.interactions += 1;
     recordEvent('interaction');
+    // Step2改: 呼びかけから3分以内の操作は「応えてくれた」として親密度アップ
+    if (lastCallAt && (now() - lastCallAt) < 180000) {
+      lastCallAt = 0;
+      state.intimacy = clamp(state.intimacy + 2);
+      state.emotions.loneliness = clamp(state.emotions.loneliness - 10);
+      recordEvent('call-answered');
+    }
+    // Step2改: 交流10回ごとに親密度+1（少しずつ育つ）
+    if (state.experience.interactions % 10 === 0) state.intimacy = clamp(state.intimacy + 1);
     var e = state.emotions;
     e.loneliness = clamp(e.loneliness - 5);
     e.boredom = clamp(e.boredom - 5);
@@ -2423,9 +2437,20 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
   // 60秒ごとの小さな時間変化
   var lastTick = now();
+  var wasBusy = false;
   setInterval(function(){
     var t = now(); applyElapsed(t - lastTick); lastTick = t;
-    refreshMode(); save(false);
+    refreshMode();
+    // Step2改: 会話（多忙状態）が終わった瞬間を検出して親密度・愛情を少し上げる
+    var b = busy();
+    if (wasBusy && !b) {
+      state.intimacy = clamp(state.intimacy + 1);
+      state.emotions.affection = clamp(state.emotions.affection + 2);
+      state.emotions.joy = clamp(state.emotions.joy + 3);
+      recordEvent('conversation-end');
+    }
+    wasBusy = b;
+    save(false);
   }, 60000);
 
   // 実際の操作だけを交流として扱う（既存処理には干渉しない）
@@ -2455,6 +2480,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     else if (e.curiosity >= THRESH) { cand = 'expression'; reason = 'curiosity>=' + Math.round(e.curiosity); }
     else if (e.joy >= 85) { cand = 'expression'; reason = 'joy>=' + Math.round(e.joy); }
     if (!cand) return { action:'none', reason:'no-candidate' };
+    // 夜間モード(23-6時): 呼びかけと独り言は止める（休むは許可）
+    var hr = new Date().getHours();
+    if ((hr >= 23 || hr < 6) && (cand === 'call' || cand === 'soliloquy-request')) return { action:'none', reason:'quiet-hours' };
     if (a.lastByType[cand] && (t - a.lastByType[cand]) < SAME_TYPE_GAP) return { action:'none', reason:'cooldown:' + cand };
     if (a.lastAction === cand && (t - a.lastActionAt) < REPEAT_GAP) return { action:'none', reason:'avoid-repeat:' + cand };
     if (a.lastActionAt && (t - a.lastActionAt) < ANY_GAP) return { action:'none', reason:'interval' };
@@ -2478,6 +2506,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         face('SLEEP', 6000);
         state.emotions.sleepiness = clamp(state.emotions.sleepiness - 10);
       } else if (sel.action === 'call') {
+        lastCallAt = t;
         face('Sad', 0);
         var line = CALL_LINES[callLineIdx % CALL_LINES.length]; callLineIdx++;
         if (typeof speak === 'function') speak(line, function(){ face('Default', 0); });
@@ -2485,8 +2514,28 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         state.emotions.clinginess = clamp(state.emotions.clinginess - 5);
       } else if (sel.action === 'soliloquy-request') {
         // 既存の独り言（環境観察）。向こう側にも多忙ガードとカメラ変化の条件がある。
+        var beforeSpeech = '';
+        try { beforeSpeech = lastPetSpeech || ''; } catch(e) {}
         if (typeof analyzeEnvironment === 'function') analyzeEnvironment();
         state.emotions.boredom = clamp(state.emotions.boredom - 5);
+        // 軽量フォールバック: 20秒待っても発話がなければ、Geminiなしの短い独り言に切り替える
+        if (!executeAction.fallbackPending) {
+          executeAction.fallbackPending = true;
+          setTimeout(function(){
+            executeAction.fallbackPending = false;
+            try {
+              var afterSpeech = lastPetSpeech || '';
+              if (afterSpeech === beforeSpeech && window.PetEmotion.canActAutonomously() && state.emotions.boredom >= 55 && typeof speak === 'function') {
+                var lines = ['んー、ひまだなあ', 'なんか面白いことないかな', 'ぼーっとしちゃうな'];
+                var li = (executeAction.fbIdx = ((executeAction.fbIdx || 0) + 1) % lines.length);
+                speak(lines[li]);
+                state.emotions.boredom = clamp(state.emotions.boredom - 10);
+                recordEvent('soliloquy-fallback');
+                save(false);
+              }
+            } catch(e) {}
+          }, 20000);
+        }
       } else if (sel.action === 'expression') {
         face(state.emotions.curiosity >= THRESH ? 'Surprised' : 'Happy', 4000);
       }
@@ -2515,6 +2564,21 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     getCurrentAction: function(){ return JSON.parse(JSON.stringify(state.autonomy.current)); }
   };
 
+  // ===== ウェイクワード待機のウォッチドッグ =====
+  // 待機モードONなのに認識インスタンスが無い状態が続いたら、既存の開始関数を呼び直す。
+  // 既存側の自動再開（onend後0.9秒）で復旧しなかった場合の保険。権限エラー時は既存側がモードを切るので干渉しない。
+  setInterval(function(){
+    try {
+      if (typeof isWakeModeEnabled !== 'undefined' && isWakeModeEnabled &&
+          typeof isActivated !== 'undefined' && isActivated &&
+          typeof wakeRecognitionInstance !== 'undefined' && !wakeRecognitionInstance &&
+          !busy() && typeof startWakeRecognition === 'function') {
+        startWakeRecognition();
+        recordEvent('wake-watchdog');
+      }
+    } catch(e) {}
+  }, 20000);
+
   // ===== 一時デバッグ表示 (?debug=1) ここから =====
   // Step1確認用の一時コード。確認が終わったらこのブロックごと削除すること。
   // ?debug=1 の時だけ画面左上に感情状態を小さく表示する。通常時は要素を作らず動作に影響しない。
@@ -2536,6 +2600,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
           var ca = window.PetEmotion.getCurrentAction();
           lines.push('現在の行動: ' + ca.action + ' (' + ca.reason + ')');
           lines.push('経験: 交流' + s.experience.interactions + '回 / 活動' + s.experience.activeDays + '日 / 訪問' + s.experience.sessions + '回');
+          try {
+            var wk = (typeof isWakeModeEnabled !== 'undefined' && isWakeModeEnabled) ? ((typeof wakeRecognitionInstance !== 'undefined' && wakeRecognitionInstance) ? '待機中' : '再開待ち') : 'OFF';
+            lines.push('呼びかけ待機: ' + wk);
+          } catch(e) {}
           box.textContent = lines.join('\n');
         } catch(e) {}
       };
