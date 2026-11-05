@@ -2324,8 +2324,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     if (!ms || ms <= 0) return;
     var h = Math.min(ms / 3600000, 24); // 一度に最大24時間分まで
     var e = state.emotions;
-    e.loneliness = clamp(e.loneliness + 3*h);
-    e.boredom     = clamp(e.boredom + 2*h);
+    e.loneliness = clamp(e.loneliness + 9*h);
+    e.boredom     = clamp(e.boredom + 6*h);
     e.clinginess = clamp(e.clinginess + 1.5*h);
     e.sleepiness = clamp(e.sleepiness + 2*h);
     e.anxiety    = clamp(e.anxiety + 0.5*h);
