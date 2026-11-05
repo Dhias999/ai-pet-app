@@ -2290,5 +2290,116 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             });
         }
     </script>
+
+    <script>
+// ===== 感情・内部状態エンジン Step1 ここから =====
+// 既存機能（Gemini会話・音声入力・呼びかけ待ち受け・独り言 analyzeEnvironment 等）は変更しない。
+// このブロックは状態の保持とAPI公開のみを行い、発話は行わない（独り言との接続はStep3）。
+(function () {
+  'use strict';
+  var KEY = 'aiPetEmotionStateV1'; // 既存キー ai_pet_wake_name / gemini_api_key とは別
+  var EMOTIONS = ['joy','loneliness','affection','anger','anxiety','relief','curiosity','sleepiness','boredom','clinginess','sadness','excitement'];
+  // joy=嬉しさ loneliness=寂しさ affection=愛情 anger=怒り anxiety=不安 relief=安心
+  // curiosity=好奇心 sleepiness=眠気 boredom=退屈 clinginess=甘えたい sadness=悲しさ excitement=興奮
+  var BASE = { joy:50, loneliness:20, affection:30, anger:0, anxiety:10, relief:50, curiosity:40, sleepiness:20, boredom:20, clinginess:20, sadness:10, excitement:20 };
+  function clamp(v){ v = Number(v); return isNaN(v) ? 0 : Math.max(0, Math.min(100, v)); }
+  function now(){ return Date.now(); }
+  var state = { emotions:{}, intimacy:20, mode:'idle', lastInteractionAt:now(), savedAt:now() };
+  EMOTIONS.forEach(function(k){ state.emotions[k] = BASE[k]; });
+
+  // 保存（スロットル付き）
+  var saveTimer = null, lastSave = 0;
+  function save(immediate){
+    var write = function(){
+      lastSave = now(); state.savedAt = now();
+      try { localStorage.setItem(KEY, JSON.stringify(state)); } catch(e) {}
+    };
+    if (immediate) { if (saveTimer){ clearTimeout(saveTimer); saveTimer=null; } write(); return; }
+    if (now() - lastSave >= 5000) { write(); return; }
+    if (!saveTimer) saveTimer = setTimeout(function(){ saveTimer=null; write(); }, 5000);
+  }
+
+  // 経過時間による変化（経過h単位、上限あり）
+  function applyElapsed(ms){
+    if (!ms || ms <= 0) return;
+    var h = Math.min(ms / 3600000, 24); // 一度に最大24時間分まで
+    var e = state.emotions;
+    e.loneliness = clamp(e.loneliness + 3*h);
+    e.boredom     = clamp(e.boredom + 2*h);
+    e.clinginess = clamp(e.clinginess + 1.5*h);
+    e.sleepiness = clamp(e.sleepiness + 2*h);
+    e.anxiety    = clamp(e.anxiety + 0.5*h);
+    e.affection  = clamp(e.affection - 0.5*h);
+    // 嬉しさ・興奮は基準値へ徐々に減衰
+    e.joy        = clamp(e.joy + (50 - e.joy) * Math.min(1, 0.1*h));
+    e.excitement = clamp(e.excitement + (10 - e.excitement) * Math.min(1, 0.2*h));
+    e.sadness    = clamp(e.sadness + (10 - e.sadness) * Math.min(1, 0.05*h));
+  }
+
+  // 復元＋オフライン経過の反映
+  try {
+    var raw = localStorage.getItem(KEY);
+    if (raw) {
+      var s = JSON.parse(raw);
+      if (s && s.emotions) EMOTIONS.forEach(function(k){ if (s.emotions[k] != null) state.emotions[k] = clamp(s.emotions[k]); });
+      if (s && s.intimacy != null) state.intimacy = clamp(s.intimacy);
+      if (s && s.lastInteractionAt) state.lastInteractionAt = s.lastInteractionAt;
+      if (s && s.savedAt) applyElapsed(now() - s.savedAt);
+    }
+  } catch(e) {}
+  save(true);
+
+  // 既存の多忙フラグ参照: isSpeaking(読み上げ中) / isApiProcessing(Gemini通信中) /
+  // isConversing(会話中) / isListening(聞き取り中) は既存scriptのグローバル変数。
+  // 参照できない環境では speechSynthesis のみで判定する。
+  function busy(){
+    try { if (typeof isSpeaking !== 'undefined' && isSpeaking) return true; } catch(e) {}
+    try { if (typeof isApiProcessing !== 'undefined' && isApiProcessing) return true; } catch(e) {}
+    try { if (typeof isConversing !== 'undefined' && isConversing) return true; } catch(e) {}
+    try { if (typeof isListening !== 'undefined' && isListening) return true; } catch(e) {}
+    try { if (window.speechSynthesis && window.speechSynthesis.speaking) return true; } catch(e) {}
+    return false;
+  }
+  function refreshMode(){
+    try { if (typeof isSleeping !== 'undefined' && isSleeping) { state.mode = 'rest'; return; } } catch(e) {}
+    state.mode = busy() ? 'conversation' : 'idle';
+  }
+  function onInteraction(){
+    state.lastInteractionAt = now();
+    var e = state.emotions;
+    e.loneliness = clamp(e.loneliness - 5);
+    e.boredom = clamp(e.boredom - 5);
+    e.clinginess = clamp(e.clinginess - 2);
+    e.joy = clamp(e.joy + 2);
+    save(false);
+  }
+
+  // 60秒ごとの小さな時間変化
+  var lastTick = now();
+  setInterval(function(){
+    var t = now(); applyElapsed(t - lastTick); lastTick = t;
+    refreshMode(); save(false);
+  }, 60000);
+
+  // 実際の操作だけを交流として扱う（既存処理には干渉しない）
+  window.addEventListener('pointerdown', onInteraction, { passive:true });
+  window.addEventListener('keydown', onInteraction);
+  window.addEventListener('beforeunload', function(){ save(true); });
+  document.addEventListener('visibilitychange', function(){ if (document.hidden) save(true); });
+
+  window.PetEmotion = {
+    getState: function(){ refreshMode(); return JSON.parse(JSON.stringify(state)); },
+    update: function(delta){
+      if (!delta) return this.getState();
+      EMOTIONS.forEach(function(k){ if (delta[k] != null) state.emotions[k] = clamp(state.emotions[k] + Number(delta[k] || 0)); });
+      if (delta.intimacy != null) state.intimacy = clamp(state.intimacy + Number(delta.intimacy || 0));
+      save(false); return this.getState();
+    },
+    onInteraction: onInteraction,
+    canActAutonomously: function(){ return !busy(); }
+  };
+})();
+// ===== 感情・内部状態エンジン Step1 ここまで =====
+    </script>
 </body>
 </html>
