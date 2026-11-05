@@ -2297,9 +2297,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     </script>
 
     <script>
-// ===== 感情・内部状態エンジン Step1 ここから =====
-// 既存機能（Gemini会話・音声入力・呼びかけ待ち受け・独り言 analyzeEnvironment 等）は変更しない。
-// このブロックは状態の保持とAPI公開のみを行い、発話は行わない（独り言との接続はStep3）。
+// ===== 感情・内部状態エンジン Step1-4 ここから =====
+// 既存機能（Gemini会話・音声入力・呼びかけ待ち受け等）のコード自体は変更しない。
+// Step1: 状態保持とAPI公開 / Step2: 行動選択 chooseAction / Step3: 独り言・表情・呼びかけへの接続
+// Step4: 経験（交流回数・活動日数・直近イベント）の記録と選択への反映。
 (function () {
   'use strict';
   var KEY = 'aiPetEmotionStateV1'; // 既存キー ai_pet_wake_name / gemini_api_key とは別
@@ -2309,7 +2310,23 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   var BASE = { joy:50, loneliness:20, affection:30, anger:0, anxiety:10, relief:50, curiosity:40, sleepiness:20, boredom:20, clinginess:20, sadness:10, excitement:20 };
   function clamp(v){ v = Number(v); return isNaN(v) ? 0 : Math.max(0, Math.min(100, v)); }
   function now(){ return Date.now(); }
-  var state = { emotions:{}, intimacy:20, mode:'idle', lastInteractionAt:now(), savedAt:now() };
+  var state = { emotions:{}, intimacy:20, mode:'idle', lastInteractionAt:now(), savedAt:now(),
+    experience:{ interactions:0, activeDays:0, lastVisitDate:'', sessions:0, events:[] },
+    autonomy:{ lastAction:'none', lastActionAt:0, lastByType:{}, current:{ action:'none', reason:'init' } } };
+  function recordEvent(type){
+    try {
+      var ev = state.experience.events;
+      var last = ev[ev.length-1];
+      if (last && last.type === type && (now() - last.t) < 60000) return; // 同種イベントは1分に1回まで
+      ev.push({ t:now(), type:type });
+      while (ev.length > 20) ev.shift();
+    } catch(e) {}
+  }
+  function hasRecentEvent(type, withinMs){
+    var ev = state.experience.events;
+    for (var i = ev.length-1; i >= 0; i--) { if (ev[i].type === type) return (now() - ev[i].t) <= withinMs; }
+    return false;
+  }
   EMOTIONS.forEach(function(k){ state.emotions[k] = BASE[k]; });
 
   // 保存（スロットル付き）
@@ -2349,8 +2366,31 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
       if (s && s.emotions) EMOTIONS.forEach(function(k){ if (s.emotions[k] != null) state.emotions[k] = clamp(s.emotions[k]); });
       if (s && s.intimacy != null) state.intimacy = clamp(s.intimacy);
       if (s && s.lastInteractionAt) state.lastInteractionAt = s.lastInteractionAt;
+      if (s && s.experience) {
+        if (s.experience.interactions != null) state.experience.interactions = s.experience.interactions|0;
+        if (s.experience.activeDays != null) state.experience.activeDays = s.experience.activeDays|0;
+        if (s.experience.lastVisitDate) state.experience.lastVisitDate = s.experience.lastVisitDate;
+        if (s.experience.sessions != null) state.experience.sessions = s.experience.sessions|0;
+        if (Array.isArray(s.experience.events)) state.experience.events = s.experience.events.slice(-20);
+      }
+      if (s && s.autonomy) {
+        if (s.autonomy.lastAction) state.autonomy.lastAction = s.autonomy.lastAction;
+        if (s.autonomy.lastActionAt) state.autonomy.lastActionAt = s.autonomy.lastActionAt;
+        if (s.autonomy.lastByType) state.autonomy.lastByType = s.autonomy.lastByType;
+      }
       if (s && s.savedAt) applyElapsed(now() - s.savedAt);
     }
+  } catch(e) {}
+  // Step4: セッションと活動日の記録（新しい日なら活動日数+1、24時間以上空いたら長期不在として記録）
+  try {
+    var todayStr = new Date(now()).toDateString();
+    if (state.experience.lastVisitDate !== todayStr) {
+      if (state.experience.lastVisitDate) state.experience.activeDays += 1; else state.experience.activeDays = 1;
+      state.experience.lastVisitDate = todayStr;
+    }
+    if (now() - state.lastInteractionAt > 24*3600000 && state.experience.sessions > 0) recordEvent('long-absence');
+    state.experience.sessions += 1;
+    recordEvent('visit');
   } catch(e) {}
   save(true);
 
@@ -2371,6 +2411,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   }
   function onInteraction(){
     state.lastInteractionAt = now();
+    state.experience.interactions += 1;
+    recordEvent('interaction');
     var e = state.emotions;
     e.loneliness = clamp(e.loneliness - 5);
     e.boredom = clamp(e.boredom - 5);
@@ -2392,6 +2434,73 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   window.addEventListener('beforeunload', function(){ save(true); });
   document.addEventListener('visibilitychange', function(){ if (document.hidden) save(true); });
 
+  // ===== Step2: 自律行動の選択 =====
+  // 優先順位: 眠気(休む) > 寂しさ(呼びかけ) > 退屈(独り言を促す) > 好奇心(表情) > 嬉しさ(表情)
+  // Step4の反映: 親密度50以上で寂しさの発動しきい値+10（絆で安心する）。
+  // 長期不在の直後は寂しさ50以上でも呼びかけ候補にする。
+  var THRESH = 70;         // 発動しきい値の初期値
+  var SAME_TYPE_GAP = 5*60000;  // 同じ種類の自律行動は最低5分空ける
+  var ANY_GAP = 2*60000;        // 自律行動全体でも最低2分空ける
+  var REPEAT_GAP = 10*60000;    // 直前と同じ行動は10分空ける
+  function chooseAction(){
+    if (!window.PetEmotion.canActAutonomously()) return { action:'wait', reason:'busy' };
+    var e = state.emotions, a = state.autonomy, t = now();
+    var cand = null, reason = '';
+    var callThresh = THRESH + (state.intimacy >= 50 ? 10 : 0);
+    if (hasRecentEvent('long-absence', 10*60000)) callThresh = Math.min(callThresh, 50);
+    if (e.sleepiness >= 75) { cand = 'rest'; reason = 'sleepiness>=' + Math.round(e.sleepiness); }
+    else if (e.loneliness >= callThresh) { cand = 'call'; reason = 'loneliness>=' + Math.round(e.loneliness); }
+    else if (e.clinginess >= THRESH && state.intimacy >= 40) { cand = 'call'; reason = 'clinginess>=' + Math.round(e.clinginess); }
+    else if (e.boredom >= THRESH) { cand = 'soliloquy-request'; reason = 'boredom>=' + Math.round(e.boredom); }
+    else if (e.curiosity >= THRESH) { cand = 'expression'; reason = 'curiosity>=' + Math.round(e.curiosity); }
+    else if (e.joy >= 85) { cand = 'expression'; reason = 'joy>=' + Math.round(e.joy); }
+    if (!cand) return { action:'none', reason:'no-candidate' };
+    if (a.lastByType[cand] && (t - a.lastByType[cand]) < SAME_TYPE_GAP) return { action:'none', reason:'cooldown:' + cand };
+    if (a.lastAction === cand && (t - a.lastActionAt) < REPEAT_GAP) return { action:'none', reason:'avoid-repeat:' + cand };
+    if (a.lastActionAt && (t - a.lastActionAt) < ANY_GAP) return { action:'none', reason:'interval' };
+    return { action:cand, reason:reason };
+  }
+
+  // ===== Step3: 選択結果を既存機能へ接続（表情・呼びかけ発話・独り言） =====
+  var CALL_LINES = ['ねえねえ、かまってほしいな', 'ねえ、こっち見てほしいな', 'なんだか寂しくなっちゃった'];
+  var callLineIdx = 0;
+  function face(name, backMs){
+    try { if (typeof setEmotion === 'function') setEmotion(name); } catch(e) {}
+    if (backMs) setTimeout(function(){ try { if (typeof setEmotion === 'function' && window.PetEmotion.canActAutonomously()) setEmotion('Default'); } catch(e) {} }, backMs);
+  }
+  function executeAction(sel){
+    var a = state.autonomy, t = now();
+    a.lastAction = sel.action; a.lastActionAt = t; a.lastByType[sel.action] = t;
+    a.current = { action:sel.action, reason:sel.reason };
+    recordEvent('action:' + sel.action);
+    try {
+      if (sel.action === 'rest') {
+        face('SLEEP', 6000);
+        state.emotions.sleepiness = clamp(state.emotions.sleepiness - 10);
+      } else if (sel.action === 'call') {
+        face('Sad', 0);
+        var line = CALL_LINES[callLineIdx % CALL_LINES.length]; callLineIdx++;
+        if (typeof speak === 'function') speak(line, function(){ face('Default', 0); });
+        else face('Default', 4000);
+        state.emotions.clinginess = clamp(state.emotions.clinginess - 5);
+      } else if (sel.action === 'soliloquy-request') {
+        // 既存の独り言（環境観察）。向こう側にも多忙ガードとカメラ変化の条件がある。
+        if (typeof analyzeEnvironment === 'function') analyzeEnvironment();
+        state.emotions.boredom = clamp(state.emotions.boredom - 5);
+      } else if (sel.action === 'expression') {
+        face(state.emotions.curiosity >= THRESH ? 'Surprised' : 'Happy', 4000);
+      }
+    } catch(e) {}
+    save(false);
+  }
+
+  // 自律ループ（30秒ごと）: 選択だけを更新し、候補があれば実行する
+  setInterval(function(){
+    var sel = chooseAction();
+    state.autonomy.current = sel;
+    if (sel.action !== 'none' && sel.action !== 'wait') executeAction(sel);
+  }, 30000);
+
   window.PetEmotion = {
     getState: function(){ refreshMode(); return JSON.parse(JSON.stringify(state)); },
     update: function(delta){
@@ -2401,7 +2510,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
       save(false); return this.getState();
     },
     onInteraction: onInteraction,
-    canActAutonomously: function(){ return !busy(); }
+    canActAutonomously: function(){ return !busy(); },
+    chooseAction: chooseAction,
+    getCurrentAction: function(){ return JSON.parse(JSON.stringify(state.autonomy.current)); }
   };
 
   // ===== 一時デバッグ表示 (?debug=1) ここから =====
@@ -2422,6 +2533,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
           lines.push('親密度: ' + Math.round(s.intimacy));
           lines.push('状態: ' + s.mode);
           lines.push('canActAutonomously: ' + window.PetEmotion.canActAutonomously());
+          var ca = window.PetEmotion.getCurrentAction();
+          lines.push('現在の行動: ' + ca.action + ' (' + ca.reason + ')');
+          lines.push('経験: 交流' + s.experience.interactions + '回 / 活動' + s.experience.activeDays + '日 / 訪問' + s.experience.sessions + '回');
           box.textContent = lines.join('\n');
         } catch(e) {}
       };
@@ -2431,7 +2545,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   } catch(e) {}
   // ===== 一時デバッグ表示 (?debug=1) ここまで =====
 })();
-// ===== 感情・内部状態エンジン Step1 ここまで =====
+// ===== 感情・内部状態エンジン Step1-4 ここまで =====
     </script>
 </body>
 </html>
