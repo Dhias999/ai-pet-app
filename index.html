@@ -215,7 +215,7 @@
             </div>
 
             <div id="statusBadge" class="status-badge">未起動</div>
-            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg viewBox="0 0 600 600" fill="none" xmlns="http://www.w3.org/2000/svg" style="touch-action: none;">
                 <rect width="600" height="600" fill="none"/>
                 <g id="faceGroup" class="anim-gaze" style="transform-origin: 300px 300px;">
                     <g id="leftEyeGroup" class="anim-emotion" style="transform-origin: 175px 237px;">
@@ -2734,6 +2734,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
       petLastX = ev.clientX; petLastY = ev.clientY;
     } catch(e) {}
   }, { passive:true });
+  window.addEventListener('pointercancel', function(){ petLastX = null; petLastY = null; }, { passive:true });
 
   // バッテリー連動 (Android Chrome: navigator.getBattery)
   try {
