@@ -208,7 +208,7 @@
     <video id="cameraStream" autoplay playsinline muted></video>
 
     <div class="main-container">
-        <div class="pet-stage" id="petStage" onclick="handleStageClick()">
+        <div class="pet-stage" id="petStage" onclick="handleStageClick()" style="touch-action: none;">
             <div id="activateOverlay" class="activate-overlay" onclick="event.stopPropagation()">
                 <button class="activate-btn" onclick="triggerActivation()">Vaultフォルダを選択して起動</button>
                 <div class="activate-hint">タップしてファイル選択画面からObsidianのVaultフォルダを指定してください。</div>
@@ -2704,34 +2704,48 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     document.body.appendChild(snackBtn);
   } catch(e) {}
 
-  // なでなで検出: 顔のあたりを指でこすったら1ストロークとして反応する
+  // なでなで検出: ペットのステージ上を指でこすったら1ストロークとして反応する
   var petAcc = 0, petLastX = null, petLastY = null, petLastAt = 0;
+  function handlePetMove(cx, cy){
+    var stageEl = document.getElementById('petStage');
+    var faceEl = document.getElementById('faceGroup');
+    var inArea = false;
+    var targetEl = stageEl || faceEl;
+    if (targetEl && targetEl.getBoundingClientRect) {
+      var r = targetEl.getBoundingClientRect();
+      inArea = cx >= r.left - 20 && cx <= r.right + 20 && cy >= r.top - 20 && cy <= r.bottom + 20;
+    } else {
+      inArea = cy < window.innerHeight * 0.6;
+    }
+    if (!inArea) { petLastX = null; petLastY = null; return; }
+    if (petLastX != null) {
+      petAcc += Math.abs(cx - petLastX) + Math.abs(cy - petLastY);
+      if (petAcc > 200 && (now() - petLastAt) > 600) {
+        petAcc = 0; petLastAt = now();
+        state.emotions.affection = clamp(state.emotions.affection + 4);
+        state.emotions.joy = clamp(state.emotions.joy + 6);
+        state.emotions.clinginess = clamp(state.emotions.clinginess - 3);
+        recordEvent('petted');
+        face('Happy', 2500);
+        floatEmoji('💗', cx, cy);
+        save(false);
+      }
+    }
+    petLastX = cx; petLastY = cy;
+  }
   window.addEventListener('pointermove', function(ev){
     try {
       if (ev.pointerType !== 'touch' && !(ev.buttons & 1)) return;
-      var faceEl = document.getElementById('faceGroup');
-      var inFace = false;
-      if (faceEl && faceEl.getBoundingClientRect) {
-        var r = faceEl.getBoundingClientRect();
-        inFace = ev.clientX >= r.left - 20 && ev.clientX <= r.right + 20 && ev.clientY >= r.top - 20 && ev.clientY <= r.bottom + 20;
-      } else {
-        inFace = ev.clientY < window.innerHeight * 0.6;
-      }
-      if (!inFace) { petLastX = null; return; }
-      if (petLastX != null) {
-        petAcc += Math.abs(ev.clientX - petLastX) + Math.abs(ev.clientY - petLastY);
-        if (petAcc > 300 && (now() - petLastAt) > 600) {
-          petAcc = 0; petLastAt = now();
-          state.emotions.affection = clamp(state.emotions.affection + 4);
-          state.emotions.joy = clamp(state.emotions.joy + 6);
-          state.emotions.clinginess = clamp(state.emotions.clinginess - 3);
-          recordEvent('petted');
-          face('Happy', 2500);
-          floatEmoji('💗', ev.clientX, ev.clientY);
-          save(false);
-        }
-      }
-      petLastX = ev.clientX; petLastY = ev.clientY;
+      handlePetMove(ev.clientX, ev.clientY);
+    } catch(e) {}
+  }, { passive:true });
+  // タッチ環境では pointermove が届かない場合があるため touchmove でも検出する（二重数え防止付き）
+  window.addEventListener('touchmove', function(ev){
+    try {
+      var t = ev.touches && ev.touches[0];
+      if (!t) return;
+      if (petLastX != null && Math.abs(t.clientX - petLastX) < 3 && Math.abs(t.clientY - petLastY) < 3) return;
+      handlePetMove(t.clientX, t.clientY);
     } catch(e) {}
   }, { passive:true });
   window.addEventListener('pointercancel', function(){ petLastX = null; petLastY = null; }, { passive:true });
