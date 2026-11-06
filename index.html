@@ -1765,39 +1765,48 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         async function getCurrentLocation() {
             if (!navigator.geolocation) {
                 dbgLog("[位置情報エラー] ブラウザが Geolocation API に非対応です", true);
-                return { lat: null, lon: null };
+                return { lat: null, lon: null, accuracy: null };
             }
 
             dbgLog("[位置情報] GPS座標を取得中...");
 
+            function tryGet(options) {
+                return new Promise((resolve) => {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            resolve({
+                                lat: position.coords.latitude,
+                                lon: position.coords.longitude,
+                                accuracy: (position.coords.accuracy != null ? position.coords.accuracy : null)
+                            });
+                        },
+                        (error) => {
+                            dbgLog(`[位置情報取得失敗] コード:${error.code}, 詳細:${error.message}`, true);
+                            resolve(null);
+                        },
+                        options
+                    );
+                });
+            }
+
             const timeoutPromise = new Promise((resolve) => {
                 setTimeout(() => {
-                    dbgLog("[位置情報警告] 位置情報取得が独自タイムアウト(10秒)しました", true);
-                    resolve({ lat: null, lon: null });
-                }, 10000);
+                    dbgLog("[位置情報警告] 位置情報取得が独自タイムアウト(12秒)しました", true);
+                    resolve({ lat: null, lon: null, accuracy: null });
+                }, 12000);
             });
 
-            const geoPromise = new Promise((resolve) => {
-                navigator.geolocation.getCurrentPosition(
-                    (position) => {
-                        const coords = {
-                            lat: position.coords.latitude,
-                            lon: position.coords.longitude
-                        };
-                        dbgLog(`[位置情報取得成功] lat: ${coords.lat}, lon: ${coords.lon}`);
-                        resolve(coords);
-                    },
-                    (error) => {
-                        dbgLog(`[位置情報取得失敗] コード:${error.code}, 詳細:${error.message}`, true);
-                        resolve({ lat: null, lon: null });
-                    },
-                    { 
-                        enableHighAccuracy: false,
-                        timeout: 8000,
-                        maximumAge: 60000
-                    }
-                );
-            });
+            const geoPromise = (async () => {
+                // まず高精度（GPS）で取りに行き、失敗したら低精度（ネットワーク測位）に落とす
+                let c = await tryGet({ enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+                if (!c) {
+                    dbgLog("[位置情報] 高精度測位に失敗したため、低精度で再試行します");
+                    c = await tryGet({ enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 });
+                }
+                if (!c) return { lat: null, lon: null, accuracy: null };
+                dbgLog(`[位置情報取得成功] lat: ${c.lat}, lon: ${c.lon}, 精度: ${c.accuracy != null ? Math.round(c.accuracy) + "m" : "不明"}`);
+                return c;
+            })();
 
             return await Promise.race([geoPromise, timeoutPromise]);
         }
@@ -1813,12 +1822,22 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             }
 
             pendingLocationCoords = coords;
-            dbgLog(`[位置情報判定] 座標保持: ${coords.lat}, ${coords.lon}`);
+            dbgLog(`[位置情報判定] 座標保持: ${coords.lat}, ${coords.lon}, 精度: ${coords.accuracy != null ? Math.round(coords.accuracy) + "m" : "不明"}`);
 
-            const THRESHOLD_METERS = 80;
+            // 精度が悪すぎる座標では誤判定（別の場所を登録済みの場所と取り違える等）を避けるため、場所の判定自体をしない
+            if (coords.accuracy != null && coords.accuracy > 150) {
+                currentKnownLocationName = "お出かけ先";
+                pendingLocationCoords = null;
+                dbgLog("[位置情報判定] 精度が低すぎるため場所の判定をスキップしました");
+                return { isKnown: true, name: currentKnownLocationName, message: "位置情報の精度が低くて、場所の判定ができなかったよ。" };
+            }
+
+            // 一致判定は厳しめに: 距離30m以内 かつ 精度60m以内 のときだけ「その場所」と断定する（誤認防止）
+            const THRESHOLD_METERS = 30;
+            const ACCURACY_LIMIT = 60;
             const matched = knownLocations.find(loc => {
                 const dist = calculateDistance(coords.lat, coords.lon, loc.lat, loc.lon);
-                return dist <= THRESHOLD_METERS;
+                return dist <= THRESHOLD_METERS && (coords.accuracy == null || coords.accuracy <= ACCURACY_LIMIT);
             });
 
             if (matched) {
