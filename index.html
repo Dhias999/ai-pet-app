@@ -2785,39 +2785,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
     } catch(e) {}
   }, 20000);
 
-  // ===== 一時デバッグ表示 (?debug=1) ここから =====
-  // Step1確認用の一時コード。確認が終わったらこのブロックごと削除すること。
-  // ?debug=1 の時だけ画面左上に感情状態を小さく表示する。通常時は要素を作らず動作に影響しない。
-  try {
-    if (new URLSearchParams(location.search).get('debug') === '1') {
-      var LABELS = { joy:'嬉しさ', loneliness:'寂しさ', affection:'愛情', anger:'怒り', anxiety:'不安', relief:'安心', curiosity:'好奇心', sleepiness:'眠気', boredom:'退屈', clinginess:'甘えたい', sadness:'悲しさ', excitement:'興奮', hunger:'空腹' };
-      var box = document.createElement('div');
-      box.id = 'petEmotionDebug';
-      box.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.75);color:#fff;font:11px/1.5 monospace;padding:8px 10px;border-radius:8px;pointer-events:none;white-space:pre;';
-      document.body.appendChild(box);
-      var renderDebug = function(){
-        try {
-          var s = window.PetEmotion.getState();
-          var lines = ['[PetEmotion debug]'];
-          EMOTIONS.forEach(function(k){ lines.push(LABELS[k] + ': ' + Math.round(s.emotions[k])); });
-          lines.push('親密度: ' + Math.round(s.intimacy));
-          lines.push('状態: ' + s.mode);
-          lines.push('canActAutonomously: ' + window.PetEmotion.canActAutonomously());
-          var ca = window.PetEmotion.getCurrentAction();
-          lines.push('現在の行動: ' + ca.action + ' (' + ca.reason + ')');
-          lines.push('経験: 交流' + s.experience.interactions + '回 / 活動' + s.experience.activeDays + '日 / 訪問' + s.experience.sessions + '回');
-          try {
-            var wk = (typeof isWakeModeEnabled !== 'undefined' && isWakeModeEnabled) ? ((typeof wakeRecognitionInstance !== 'undefined' && wakeRecognitionInstance) ? '待機中' : '再開待ち') : 'OFF';
-            lines.push('呼びかけ待機: ' + wk);
-          } catch(e) {}
-          box.textContent = lines.join('\n');
-        } catch(e) {}
-      };
-      renderDebug();
-      setInterval(renderDebug, 2000);
-    }
-  } catch(e) {}
-  // ===== 一時デバッグ表示 (?debug=1) ここまで =====
 })();
 // ===== 感情・内部状態エンジン Step1-4 ここまで =====
     </script>
