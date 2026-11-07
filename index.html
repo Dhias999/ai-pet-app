@@ -2822,5 +2822,31 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 })();
 // ===== 感情・内部状態エンジン Step1-4 ここまで =====
     </script>
+<script>
+// ?debug=1 のときだけ表示: 現在の行動選択と理由（通常画面には出ない）
+(function(){
+  try {
+    if (new URLSearchParams(location.search).get('debug') !== '1') return;
+    var box = document.createElement('div');
+    box.id = 'petDebugActionPanel';
+    box.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:99999;background:rgba(0,0,0,0.78);color:#fff;font:12px/1.6 monospace;padding:8px 10px;border-radius:8px;max-width:72vw;white-space:pre-wrap;pointer-events:none;';
+    document.body.appendChild(box);
+    function fmt(t){ return t ? new Date(t).toLocaleTimeString('ja-JP') : '-'; }
+    function render(){
+      try {
+        var api = window.PetEmotion;
+        if (!api || !api.chooseAction) { box.textContent = '[debug] PetEmotion not ready'; return; }
+        var sel = api.chooseAction();
+        var st = api.getState();
+        var a = (st && st.autonomy) ? st.autonomy : {};
+        var cur = a.current || {};
+        box.textContent = '[debug] 行動選択\npreview: ' + sel.action + (sel.face ? ' (' + sel.face + ')' : '') + '\nreason: ' + sel.reason + '\ncurrent: ' + (cur.action || '-') + ' / ' + (cur.reason || '-') + '\nlast: ' + (a.lastAction || '-') + ' @ ' + fmt(a.lastActionAt || 0);
+      } catch (e) { box.textContent = '[debug] error: ' + e.message; }
+    }
+    render();
+    setInterval(render, 1000);
+  } catch (e) {}
+})();
+</script>
 </body>
 </html>
