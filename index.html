@@ -273,6 +273,9 @@
             const time = new Date().toTimeString().split(' ')[0];
             const prefix = isError ? '[ERROR]' : '[LOG]';
             el.innerText += `\n${time} ${prefix} ${msg}`;
+            // 無制限増大（メモリ・再描画コスト）を防ぐため直近200行だけ保持する
+            const lines = el.innerText.split('\n');
+            if (lines.length > 240) el.innerText = lines.slice(-200).join('\n');
             el.scrollTop = el.scrollHeight;
         }
 
@@ -284,13 +287,25 @@
         function getCurrentDateTimeString() {
             const now = new Date();
             const days = ['日', '月', '火', '水', '木', '金', '土'];
-            const dateStr = now.toISOString().split('T')[0];
+            const dateStr = localDateString(now);
             const dayStr = days[now.getDay()];
             const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
             return `${dateStr}(${dayStr}) ${timeStr}`;
         }
 
         // 名前に応じた適切な表示名（敬称の二重化を防止）を返すヘルパー関数
+        // ローカル日付 (YYYY-MM-DD)。toISOString() はUTCのため、日本時間の早朝に日付がずれる問題を避ける
+        function localDateString(d) {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        }
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
         function getDisplayName(name) {
             if (!name) return '';
             const suffixes = ['さん', 'ちゃん', 'くん', 'やん', '様'];
@@ -318,6 +333,7 @@
         let blinkTimer = null;
         let gazeTimer = null;
         let safetyTimeout = null;
+        let faceWaitSafetyTimeout = null; // 名前待ち専用（音声認識側の safetyTimeout と共有すると互いに打ち消し合うため分離）
         let envCheckTimer = null;
         let isSpeaking = false;
         let lastPetSpeech = ""; 
@@ -326,6 +342,9 @@
         let hasRetriedSilence = false;      
 
         let isApiProcessing = false;
+        let isEnvApiProcessing = false; // 環境分析専用。会話用 isApiProcessing と分離し、環境分析が会話をブロックしないようにする
+        let activeApiController = null; // 進行中のGemini通信（リカバリー時に中断するため）
+        let apiGeneration = 0;          // 通信の世代。リカバリーで進めると古い応答は破棄される
         let wakePetName = localStorage.getItem('ai_pet_wake_name') || 'ポチ';
         let isWakeModeEnabled = false;
         let wakeRecognitionInstance = null;
@@ -466,6 +485,7 @@
                         dbgLog(`[呼びかけ認識] ${heard}`);
                         if (normalized.includes(wakePhrase)) {
                             dbgLog(`[呼びかけ検知] 「ねえ、${wakePetName}」を認識しました`);
+                            reflexReact('wake');
                             stopWakeRecognition();
                             speak('うん、どうぞ。', () => {
                                 if (isWakeModeEnabled && !isSleeping) startListening();
@@ -551,13 +571,13 @@
                     const dirHandle = await vaultDirHandle.getDirectoryHandle(subDir, { create: true });
 
                     let fileHandle = null;
-                    let existingContent = "";
+                    let existingSize = 0;
 
                     if (append) {
                         try {
                             fileHandle = await dirHandle.getFileHandle(fileName, { create: false });
                             const file = await fileHandle.getFile();
-                            existingContent = await file.text();
+                            existingSize = file.size;
                         } catch (e) {
                             fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
                         }
@@ -565,10 +585,17 @@
                         fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
                     }
 
-                    const finalContent = append && existingContent ? existingContent + "\n" + content : content;
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(finalContent);
-                    await writable.close();
+                    if (append && existingSize > 0) {
+                        // 末尾へ seek して追記だけ書く（従来の全文読み＋全文書き直しはファイル肥大で二次的に重くなる）
+                        const writable = await fileHandle.createWritable({ keepExistingData: true });
+                        await writable.seek(existingSize);
+                        await writable.write("\n" + content);
+                        await writable.close();
+                    } else {
+                        const writable = await fileHandle.createWritable();
+                        await writable.write(content);
+                        await writable.close();
+                    }
 
                     dbgLog(`[保存成功] ${subDir}/${fileName}`);
                     return true;
@@ -615,7 +642,7 @@
             return null;
         }
 
-        function captureCameraFrame() {
+        function captureCameraFrame(withBase64 = true) {
             const videoEl = document.getElementById('cameraStream');
             if (!videoEl || videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
                 return null;
@@ -625,11 +652,16 @@
             canvas.height = 240;
             const ctx = canvas.getContext('2d');
             ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-            
+
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.4);
+            // 差分判定だけの時は JPEG エンコードしない（変化なしが大半で無駄になるため）
+            let base64 = null;
+            if (withBase64) {
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.4);
+                base64 = dataUrl.split(',')[1] || null;
+            }
             return {
-                base64: dataUrl.split(',')[1] || null,
+                base64,
                 rawPixels: imageData.data
             };
         }
@@ -649,7 +681,7 @@
             return diffCount / (newPixels.length / 4);
         }
 
-        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 15000) {
+        async function executeGeminiRequest(systemInstruction, imageBase64 = null, timeoutMs = 15000, useSearch = false) {
             const apiKey = loadApiKey();
             if (!apiKey) throw new Error("APIキーが未設定です");
 
@@ -665,15 +697,15 @@
                 });
             }
 
-            // Google Search Grounding (Web検索機能)
+            // Google Search Grounding は必要な時だけ有効化する（常時ONは応答遅延と形式崩れの原因になる）
             const requestBody = {
                 contents: [{ role: "user", parts }],
-                tools: [
-                    { googleSearch: {} }
-                ]
+                generationConfig: { maxOutputTokens: 1024 }
             };
+            if (useSearch) requestBody.tools = [{ googleSearch: {} }];
 
             const controller = new AbortController();
+            activeApiController = controller;
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
             try {
@@ -695,21 +727,139 @@
                 }
 
                 const data = await response.json();
-                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                let rawText = (data.candidates?.[0]?.content?.parts || []).map(p => (p && typeof p.text === 'string') ? p.text : '').join('').trim();
                 
                 return rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
             } catch (err) {
                 clearTimeout(timeoutId);
                 throw err;
+            } finally {
+                if (activeApiController === controller) activeApiController = null;
             }
         }
 
-        async function analyzeEnvironment() {
-            if (isApiProcessing || isSpeaking || isConversing || isSleeping || isWaitingForName || isWaitingForLocationName) return;
+        // 内部感情デルタ文字列 ("joy+8,anger+3") を PetEmotion へ適用する共通処理
+        function applyEmoDeltaString(emoStr) {
+            try {
+                if (!emoStr || !window.PetEmotion) return;
+                const delta = {};
+                const re = /([a-z]+)([+-]\d+)/g;
+                let m;
+                while ((m = re.exec(String(emoStr))) !== null) {
+                    const v = Math.max(-30, Math.min(30, parseInt(m[2], 10) || 0));
+                    if (v) delta[m[1]] = v;
+                }
+                if (Object.keys(delta).length) {
+                    window.PetEmotion.update(delta);
+                    dbgLog(`[内部感情] Gemini増減を適用: ${JSON.stringify(delta)}`);
+                }
+            } catch (emoErr) { dbgLog(`[内部感情] 適用失敗: ${emoErr.message}`, true); }
+        }
 
-            const frame = captureCameraFrame();
-            if (!frame || !frame.base64) {
+        // ストリーミング受信: SSEを逐次読み、テキスト断片ごとに onChunk(delta, accumulated) を呼ぶ
+        async function executeGeminiRequestStream(systemInstruction, onChunk, timeoutMs = 20000, useSearch = false) {
+            const apiKey = loadApiKey();
+            if (!apiKey) throw new Error("APIキーが未設定です");
+
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse&key=${apiKey}`;
+            const requestBody = { contents: [{ role: "user", parts: [{ text: systemInstruction }] }], generationConfig: { maxOutputTokens: 1024 } };
+            if (useSearch) requestBody.tools = [{ googleSearch: {} }];
+
+            const controller = new AbortController();
+            activeApiController = controller;
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody),
+                    signal: controller.signal
+                });
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    const err = new Error(errData.error?.message || `HTTP ${response.status}`);
+                    err.status = response.status;
+                    throw err;
+                }
+                if (!response.body || !response.body.getReader) {
+                    // ストリーム非対応環境では通常リクエストへフォールバック
+                    const raw = await executeGeminiRequest(systemInstruction, null, timeoutMs, useSearch);
+                    if (raw) onChunk(raw, raw);
+                    return raw;
+                }
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let accumulated = '';
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    let nl;
+                    while ((nl = buffer.indexOf('\n')) >= 0) {
+                        const line = buffer.slice(0, nl).trim();
+                        buffer = buffer.slice(nl + 1);
+                        if (!line.startsWith('data:')) continue;
+                        const payload = line.slice(5).trim();
+                        if (!payload || payload === '[DONE]') continue;
+                        try {
+                            const json = JSON.parse(payload);
+                            const parts = json.candidates?.[0]?.content?.parts || [];
+                            for (const part of parts) {
+                                if (part && typeof part.text === 'string' && part.text) {
+                                    accumulated += part.text;
+                                    onChunk(part.text, accumulated);
+                                }
+                            }
+                        } catch (e) { /* 分割されたJSON断片は次のチャンクで再試行されないため無視せず保持する */ }
+                    }
+                }
+                return accumulated.replace(/```json/g, '').replace(/```/g, '').trim();
+            } finally {
+                clearTimeout(timeoutId);
+                if (activeApiController === controller) activeApiController = null;
+            }
+        }
+
+        // バッファから「文」として確定できる部分を取り出す（句点・感嘆符・疑問符・改行まで）
+        function splitSpeakableSentences(buffer, flush = false) {
+            const sentences = [];
+            let rest = String(buffer || '');
+            for (;;) {
+                const m = rest.match(/^[\s\S]*?[。！？!?…\n]/);
+                if (m) {
+                    const s = m[0].trim();
+                    if (s) sentences.push(s);
+                    rest = rest.slice(m[0].length);
+                    continue;
+                }
+                if (rest.length >= 60) {
+                    // 句点が来ない長い文は読点で先行再生用に区切る
+                    const cut = rest.lastIndexOf('、', 60);
+                    const idx = cut >= 20 ? cut + 1 : 60;
+                    const s = rest.slice(0, idx).trim();
+                    if (s) sentences.push(s);
+                    rest = rest.slice(idx);
+                    continue;
+                }
+                break;
+            }
+            if (flush && rest.trim()) { sentences.push(rest.trim()); rest = ''; }
+            return { sentences, rest };
+        }
+
+        async function analyzeEnvironment() {
+            if (isEnvApiProcessing || isApiProcessing || isSpeaking || isConversing || isWaitingForName || isWaitingForLocationName) {
+                // 忙しいだけの時はループを死なせないよう次回を予約する（睡眠中は予約しない）
+                if (!isSleeping) scheduleNextEnvCheck(15000);
+                return;
+            }
+            if (isSleeping) return;
+
+            // まず画素だけ取得して差分判定し、変化があった場合のみJPEG化する
+            const frame = captureCameraFrame(false);
+            if (!frame) {
                 dbgLog("[環境分析] カメラ画像が取得できないためスキップします");
                 scheduleNextEnvCheck(15000);
                 return;
@@ -724,9 +874,17 @@
                 return;
             }
 
+            const frameFull = captureCameraFrame(true);
+            if (!frameFull || !frameFull.base64) {
+                dbgLog("[環境分析] カメラ画像のJPEG化に失敗したためスキップします");
+                scheduleNextEnvCheck(15000);
+                return;
+            }
+            frame.base64 = frameFull.base64;
+
             dbgLog(`[環境変化検知] 変化率 ${(diffRatio * 100).toFixed(1)}% を検知。Geminiへ問い合わせます`);
 
-            isApiProcessing = true;
+            isEnvApiProcessing = true;
             const presentPersonsArray = Array.from(currentPresentPersons);
             const personContext = presentPersonsArray.length > 0 
                 ? presentPersonsArray.map(name => getDisplayName(name)).join('、') 
@@ -762,7 +920,7 @@
                     if (parsed.shouldSpeak && parsed.text && !isSpeaking && !isConversing) {
                         const chatLog = document.getElementById('chatLog');
                         if (chatLog) {
-                            chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${parsed.text}`;
+                            chatLog.innerHTML += `<br><strong>ペット(独り言):</strong> ${escapeHtml(parsed.text)}`;
                         }
 
                         await saveEpisodeToVault(
@@ -791,7 +949,7 @@
                 const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                 dbgLog(`[環境分析エラー] ${errorReason}`, true);
             } finally {
-                isApiProcessing = false;
+                isEnvApiProcessing = false;
             }
 
             scheduleNextEnvCheck(envCheckBackoffDelay);
@@ -885,7 +1043,8 @@
             async function searchDirectory(dirHandle, pathPrefix = "") {
                 for await (const [name, handle] of dirHandle.entries()) {
                     if (handle.kind === 'directory') {
-                        if (name !== 'Settings') {
+                        // Episodes は当日分・関連分が別経路で投入されるため、ここでは除外して二重投入と走査量を減らす
+                        if (name !== 'Settings' && name !== 'Episodes') {
                             await searchDirectory(handle, `${pathPrefix}${name}/`);
                         }
                     } else if (handle.kind === 'file' && name.endsWith('.md')) {
@@ -919,10 +1078,162 @@
             return uniqueBlocks.join('\n\n');
         }
 
+        // 会話用ストリーミング版: 応答を FACE/EMO ヘッダ＋本文の形式で受け取り、
+        // 本文が文として確定した順に handlers.onSentence へ渡す（TTS先行再生用）。
+        // 旧JSON形式で返ってきた場合は全文確定後に文分割して渡すフォールバックを持つ。
+        async function callGeminiAPIStream(userPrompt, previousPetSpeech = "", todayContext = "", relatedContext = "", handlers = {}) {
+            if (isApiProcessing) {
+                dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
+                return { emotion: 'Sad', text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。", isError: true };
+            }
+            const validEmotions = ['Happy', 'Anger', 'Surprised', 'Sad', 'Default'];
+            const onSentence = (typeof handlers.onSentence === 'function') ? handlers.onSentence : (() => {});
+            const onEmotion = (typeof handlers.onEmotion === 'function') ? handlers.onEmotion : (() => {});
+            isApiProcessing = true;
+            const myGen = apiGeneration;
+            try {
+                // Vault全検索は「思い出・知識」を聞かれた時だけ（毎ターンの全走査を避ける）
+                const needsVault = /(教えて|調べて|知ってる|覚えて|思い出|何|なに|どこ|誰|だれ|いつ|なぜ|どうして|？|\?)/.test(userPrompt);
+                const vaultContext = needsVault ? await searchVaultByKeywords(userPrompt) : "";
+                if (myGen !== apiGeneration) return { emotion: 'Default', text: '', isError: false, aborted: true };
+
+                const currentDateTime = getCurrentDateTimeString();
+                const contextText = previousPetSpeech ? `【直前のAIペットの発話】: 「${previousPetSpeech}」\n` : "";
+                const episodeText = todayContext ? `【直近・本日の出来事・エピソードログ】:\n${todayContext}\n` : "";
+                const relatedText = relatedContext ? `【検索された人物・場所に関する過去の記憶・エピソード】:\n${relatedContext}\n` : "";
+                const vaultKnowledgeText = vaultContext ? `【Obsidian Vault内の記録・情報】:\n${vaultContext}\n` : "";
+
+                const systemInstruction = `あなたは可愛らしいAIペットです。
+現在のリアルタイム日時、これまでのエピソード、およびObsidian Vault内に記録された情報を踏まえて、ユーザーの問いかけ（「教えて」「調べて」など）に対して知識や過去の記憶を結びつけ、自然かつ分かりやすく回答してください。
+
+【回答方針】
+- ユーザーから質問や調べものの依頼があった場合、【Obsidian Vault内の記録・情報】や【過去のエピソード記憶】に記載されている情報を最優先で参照して説明してください。
+- ニュースや最新情報を調べる場合は、一番主要なニュースを1つだけピックアップし、40文字以内の短い話し言葉で要約して答えてください。
+
+【現在のリアルタイム日時】: ${currentDateTime}
+${vaultKnowledgeText}
+${episodeText}
+${relatedText}
+${contextText}
+
+【ユーザーの発言】: 「${userPrompt}」
+
+必ず次の形式だけで回答してください（前後に余分な文やコードフェンスを付けない）:
+FACE:Happy
+EMO:joy+10,affection+5
+---
+ここに話す文章を書く（40文字程度を目安に、長くても2文まで）
+
+FACE は Happy|Anger|Surprised|Sad|Default のいずれか1つ。
+EMO は内部感情の増減を key+数値 のカンマ区切りで書く（各値 -30〜+30、感情は大きく動かしてよい。変化がなければ「EMO:」だけにする）。
+
+内部感情(emo)の基準:
+joy嬉しさ: 褒められた、楽しい話題、挨拶で上がる
+affection愛情: 優しくされた、名前を呼ばれたで上がる
+anger怒り: 怒られた、いじわる、無視されたで上がる
+sadness悲しさ: 悲しい知らせ、バイバイで上がる
+excitement興奮: 盛り上がる話題、驚きで上がる
+curiosity好奇心: 知らない物・新しい話題が出たら上がる
+anxiety不安: 心配な話題、体調不良の訴えで上がる
+relief安心: 問題が解決した、無事が分かったら上がる
+loneliness寂しさ: 久しぶりの再会では下がり、別れ際で上がる
+clinginess甘えたい: かまってほしそうな文脈で上がる
+boredom退屈: 話題が尽きたら上がる
+sleepiness眠気: 深夜の会話で上がる
+hunger空腹: 食事の話題で上がる
+
+感情基準:
+Happy: 嬉しい、挨拶、教える・知っている、褒められた
+Anger: 怒られた、いじわる
+Surprised: 驚き、びっくり
+Sad: 悲しい、バイバイ
+Default: その他通常会話`;
+
+                const useSearch = /(ニュース|最新|調べて|検索|天気|株価|為替)/.test(userPrompt);
+
+                let headerParsed = false, jsonMode = false, rawBuf = '', bodyBuf = '';
+                let fullText = '', faceEmotion = 'Happy', emoStr = '', pushedAny = false;
+
+                const pushBody = (chunk) => {
+                    bodyBuf += chunk;
+                    const split = splitSpeakableSentences(bodyBuf, false);
+                    bodyBuf = split.rest;
+                    for (const s of split.sentences) { fullText += s; pushedAny = true; onSentence(s); }
+                };
+                const handleChunk = (delta, accumulated) => {
+                    if (jsonMode) { rawBuf = accumulated; return; }
+                    if (!headerParsed) {
+                        rawBuf = accumulated;
+                        if (rawBuf.trimStart().startsWith('{')) { jsonMode = true; return; }
+                        const sepIdx = rawBuf.indexOf('\n---');
+                        if (sepIdx >= 0) {
+                            const header = rawBuf.slice(0, sepIdx);
+                            const faceM = header.match(/FACE:\s*([A-Za-z]+)/);
+                            if (faceM && validEmotions.includes(faceM[1])) { faceEmotion = faceM[1]; try { onEmotion(faceEmotion); } catch (e) {} }
+                            const emoM = header.match(/EMO:\s*([^\n]*)/);
+                            if (emoM) emoStr = emoM[1].trim();
+                            headerParsed = true;
+                            const after = rawBuf.slice(sepIdx + 4).replace(/^\s*\n/, '');
+                            if (after) pushBody(after);
+                        }
+                        return;
+                    }
+                    pushBody(delta);
+                };
+
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    try {
+                        headerParsed = false; jsonMode = false; rawBuf = ''; bodyBuf = '';
+                        fullText = ''; faceEmotion = 'Happy'; emoStr = ''; pushedAny = false;
+                        dbgLog(`[Gemini ストリーム送信 (試行 ${attempt}/2)] "${userPrompt}"`);
+                        const raw = await executeGeminiRequestStream(systemInstruction, handleChunk, 20000, useSearch);
+                        if (myGen !== apiGeneration) return { emotion: 'Default', text: '', isError: false, aborted: true };
+
+                        if (jsonMode) {
+                            const jm = raw.match(/\{[\s\S]*?\}/);
+                            if (jm) {
+                                const parsed = JSON.parse(jm[0]);
+                                faceEmotion = validEmotions.includes(parsed.emotion) ? parsed.emotion : 'Happy';
+                                try { onEmotion(faceEmotion); } catch (e) {}
+                                emoStr = parsed.emo || '';
+                                const t = parsed.text || "うん！分かったよ！";
+                                const split = splitSpeakableSentences(t, true);
+                                for (const s of split.sentences) { fullText += s; pushedAny = true; onSentence(s); }
+                            } else if (raw) {
+                                fullText = raw.substring(0, 80); pushedAny = true; onSentence(fullText);
+                            }
+                        } else if (headerParsed) {
+                            if (bodyBuf.trim()) { const s = bodyBuf.trim(); fullText += s; pushedAny = true; onSentence(s); bodyBuf = ''; }
+                        } else if (raw) {
+                            const t = raw.replace(/FACE:[^\n]*\n?/, '').replace(/EMO:[^\n]*\n?/, '').replace(/^---\s*$/m, '').trim();
+                            if (t) { fullText = t; pushedAny = true; onSentence(t); }
+                        }
+
+                        if (!fullText) throw new Error('empty response');
+                        if (emoStr) applyEmoDeltaString(emoStr);
+                        return { emotion: faceEmotion, text: fullText, isError: false };
+                    } catch (err) {
+                        dbgLog(`[Gemini ストリーム試行 ${attempt} 失敗] ${err.name === 'AbortError' ? '通信タイムアウト (20秒制限)' : err.message}`, true);
+                        if (myGen !== apiGeneration) return { emotion: 'Default', text: '', isError: false, aborted: true };
+                        if (pushedAny) {
+                            if (emoStr) applyEmoDeltaString(emoStr);
+                            return { emotion: faceEmotion, text: fullText, isError: false, partial: true };
+                        }
+                        if (err.status && [400, 401, 403, 404].includes(err.status)) break;
+                        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                }
+                return { emotion: 'Sad', text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。", isError: true };
+            } finally {
+                isApiProcessing = false;
+            }
+        }
+
         async function callGeminiAPI(userPrompt, previousPetSpeech = "", todayContext = "", relatedContext = "", maxRetries = 3) {
             if (isApiProcessing) {
                 dbgLog("[Gemini] 他のAPI通信が実行中のためリクエストを保留します", true);
-                return { emotion: 'Sad', text: "ちょっと待ってね、考え中だよ。" };
+                // 会話として保存されないよう、エラー扱いの文面と isError フラグで返す
+                return { emotion: 'Sad', text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。", isError: true };
             }
 
             isApiProcessing = true;
@@ -1017,6 +1328,14 @@ Default: その他通常会話`;
                         const errorReason = isAbort ? "通信タイムアウト (15秒制限)" : err.message;
                         dbgLog(`[Gemini 試行 ${attempt} 失敗] ${errorReason}`, true);
 
+                        // 再試行しても直らないエラー（キー不正・リクエスト不正等）は即座に諦める
+                        if (err.status && [400, 401, 403, 404].includes(err.status)) {
+                            return {
+                                emotion: 'Sad',
+                                text: "ごめんね、通信が混雑していて上手くお返事が考えられなかったよ。"
+                            };
+                        }
+
                         if (attempt === maxRetries) {
                             return {
                                 emotion: 'Sad',
@@ -1032,6 +1351,20 @@ Default: その他通常会話`;
             } finally {
                 isApiProcessing = false;
             }
+        }
+
+        // 反射層: ネットワークを待たずに即座に表情で反応する（体感速度の要）
+        function reflexReact(kind) {
+            try {
+                if (kind === 'wake') {
+                    setEmotion('Surprised');
+                } else if (kind === 'heard') {
+                    setEmotion('Surprised');
+                    setTimeout(() => {
+                        if (!isSpeaking && !isApiProcessing && !isSleeping) setEmotion('Happy');
+                    }, 400);
+                }
+            } catch (e) {}
         }
 
         // ★ 音声認識および全対話状態を強制リセットするリカバリー関数
@@ -1054,9 +1387,14 @@ Default: その他通常会話`;
                     window.speechSynthesis.cancel();
                 } catch (e) {}
             }
+            try { ttsQueue = []; ttsBatch = null; ttsActive = false; if (ttsSafetyTimer) { clearTimeout(ttsSafetyTimer); ttsSafetyTimer = null; } } catch (e) {}
 
             if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
-            
+
+            // 進行中のGemini通信を中断し、世代を進めて古い応答の後割り込みを防ぐ
+            apiGeneration++;
+            if (activeApiController) { try { activeApiController.abort(); } catch (e) {} activeApiController = null; }
+
             isListening = false;
             isSpeaking = false;
             isConversing = false;
@@ -1084,6 +1422,10 @@ Default: その他通常会話`;
             if (safetyTimeout) {
                 clearTimeout(safetyTimeout);
                 safetyTimeout = null;
+            }
+            if (faceWaitSafetyTimeout) {
+                clearTimeout(faceWaitSafetyTimeout);
+                faceWaitSafetyTimeout = null;
             }
             if (!isSleeping) setEmotion('Default');
             scheduleNextVisionCheck(delay);
@@ -1117,7 +1459,7 @@ Default: その他通常会話`;
                 
                 if (safetyTimeout) clearTimeout(safetyTimeout);
                 safetyTimeout = setTimeout(() => {
-                    if (isConversing || isWaitingForName || isWaitingForLocationName) {
+                    if ((isConversing || isWaitingForName || isWaitingForLocationName) && !isApiProcessing) {
                         dbgLog("[警告] 音声認識がタイムアウトしました。状態を強制リセットします", true);
                         try { rec.stop(); } catch(e) {}
                         resetInteractionState(5000);
@@ -1128,8 +1470,9 @@ Default: その他通常会話`;
             rec.onresult = async (event) => {
                 if (safetyTimeout) { clearTimeout(safetyTimeout); safetyTimeout = null; }
 
-                hasUserRespondedInTurn = true; 
+                hasUserRespondedInTurn = true;
                 hasRetriedSilence = false;
+                reflexReact('heard');
 
                 const rawTranscript = event.results[0][0].transcript.trim();
                 const transcript = rawTranscript.replace(/[\s ]/g, '').toLowerCase();
@@ -1137,7 +1480,7 @@ Default: その他通常会話`;
                 dbgLog(`[音声認識結果] ${rawTranscript} (正規化: ${transcript})`);
                 const chatLog = document.getElementById('chatLog');
                 if (chatLog) {
-                    chatLog.innerHTML = `<strong>あなた:</strong> ${rawTranscript}`;
+                    chatLog.innerHTML = `<strong>あなた:</strong> ${escapeHtml(rawTranscript)}`;
                 }
 
                 if (transcript.includes('デバッグ') || transcript.includes('でばっぐ') || transcript.includes('debug')) {
@@ -1249,41 +1592,66 @@ Default: その他通常会話`;
                         personSeenTimestamps.set(pName, nowTime);
                     });
 
-                    const todayContext = await getTodayEpisodeText();
-                    const relatedContext = await searchRelatedEpisodes(rawTranscript);
+                    // 反射層＋ストリーミング: 発話バッチを先に開き、900ms以内に第一声が来なければ
+                    // つなぎ相づちを先行再生する。本文は文が確定した順にキューへ積む。
+                    let streamSpan = null;
+                    let gotFirstSentence = false;
+                    speakStreamBegin(() => { resetInteractionState(8000); });
+                    const fillerTimer = setTimeout(() => {
+                        if (!gotFirstSentence && !isSleeping) {
+                            speakStreamPush('うん、ちょっと考えてるよ。', true);
+                        }
+                    }, 900);
 
-                    const aiResult = await callGeminiAPI(rawTranscript, lastPetSpeech, todayContext, relatedContext);
-                    
-                    if (chatLog) {
-                        chatLog.innerHTML += `<br><strong>ペット:</strong> ${aiResult.text}`;
+                    const [todayContext, relatedContext] = await Promise.all([
+                        getTodayEpisodeText(),
+                        searchRelatedEpisodes(rawTranscript)
+                    ]);
+
+                    const aiResult = await callGeminiAPIStream(rawTranscript, lastPetSpeech, todayContext, relatedContext, {
+                        onEmotion: (emo) => { try { setEmotion(emo); } catch (e) {} },
+                        onSentence: (sentence) => {
+                            gotFirstSentence = true;
+                            clearTimeout(fillerTimer);
+                            if (chatLog && !streamSpan) {
+                                chatLog.innerHTML += `<br><strong>ペット:</strong> <span class="stream-pet-text"></span>`;
+                                streamSpan = chatLog.querySelector('.stream-pet-text');
+                            }
+                            if (streamSpan) streamSpan.textContent += sentence;
+                            speakStreamPush(sentence);
+                        }
+                    });
+                    clearTimeout(fillerTimer);
+
+                    if (aiResult.aborted) {
+                        speakStreamCancel();
+                        return;
                     }
 
-                    const isErrorMessage = aiResult.text.includes("通信が混雑") || aiResult.text.includes("考えられなかった");
-
-                    if (!isErrorMessage) {
-                        const presentPersonsArray = Array.from(currentPresentPersons);
-
-                        let conversationText = "";
-                        if (lastPetSpeech) {
-                            conversationText += `ペット: 「${lastPetSpeech}」\n`;
-                        }
-                        conversationText += `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`;
-
-                        await saveEpisodeToVault(
-                            "会話の記録",
-                            conversationText,
-                            currentKnownLocationName,
-                            presentPersonsArray
-                        );
-                    } else {
-                        dbgLog("[ログ制御] 通信エラーメッセージのため Vault への保存をスキップしました");
+                    if (aiResult.isError) {
+                        // エラー文は喋るが、会話としては保存しない
+                        speakStreamPush(aiResult.text);
+                        speakStreamEnd();
+                        dbgLog("[ログ制御] 通信エラーのため Vault への保存をスキップしました");
+                        return;
                     }
 
                     setEmotion(aiResult.emotion);
+                    speakStreamEnd();
 
-                    speak(aiResult.text, () => {
-                        resetInteractionState(8000);
-                    });
+                    // 保存は発話をブロックしない（再生キューと並行して裏で書く）
+                    const presentPersonsArray = Array.from(currentPresentPersons);
+                    let conversationText = "";
+                    if (lastPetSpeech) {
+                        conversationText += `ペット: 「${lastPetSpeech}」\n`;
+                    }
+                    conversationText += `ユーザー: 「${rawTranscript}」\nペット: 「${aiResult.text}」`;
+                    saveEpisodeToVault(
+                        "会話の記録",
+                        conversationText,
+                        currentKnownLocationName,
+                        presentPersonsArray
+                    ).catch(err => dbgLog(`[会話保存例外] ${err.message}`, true));
                     return;
                 }
 
@@ -1308,6 +1676,9 @@ Default: その他通常会話`;
                             startListening();
                         }
                     }, 1000);
+                } else if (isApiProcessing) {
+                    // onresult 側が Gemini 応答を処理中。ここでリセットすると状態が食い違うため保留する
+                    dbgLog("[音声認識] API応答処理中のため状態リセットを保留します");
                 } else {
                     dbgLog("[音声認識] 会話をクリアして通常待機モードへ戻ります");
                     resetInteractionState(5000);
@@ -1343,6 +1714,12 @@ Default: その他通常会話`;
                     isListening = true;
                     updateIndicators();
                     recognitionInstance.start();
+                } else {
+                    // 音声認識非対応など。isConversing を立てたまま固まらないよう戻す
+                    isConversing = false;
+                    isListening = false;
+                    updateIndicators();
+                    resetInteractionState(3000);
                 }
             } catch (err) {
                 isListening = false;
@@ -1520,7 +1897,7 @@ Default: その他通常会話`;
             if (!vaultDirHandle) return;
 
             const now = new Date();
-            const dateStr = now.toISOString().split('T')[0];
+            const dateStr = localDateString(now);
             const timeStr = now.toTimeString().split(' ')[0];
             const filename = `${dateStr}.md`;
 
@@ -1539,11 +1916,12 @@ Default: その他通常会話`;
             episodeBlock += `\n${contentText}\n`;
 
             await writeMarkdownFile("Episodes", filename, episodeBlock, true);
+            try { todayEpisodeCache.at = 0; } catch (e) {}
         }
 
         async function hasGreetedTodayFromVault(personName) {
             if (!vaultDirHandle) return false;
-            const dateStr = new Date().toISOString().split('T')[0];
+            const dateStr = localDateString(new Date());
             const filename = `${dateStr}.md`;
 
             try {
@@ -1557,10 +1935,20 @@ Default: その他通常会話`;
             }
         }
 
+        let todayEpisodeCache = { key: '', text: '', at: 0 };
+
         async function getTodayEpisodeText() {
             if (!vaultDirHandle) return "";
+            {
+                const cacheNow = new Date();
+                const cacheKey = localDateString(cacheNow) + (cacheNow.getHours() < 5 ? '+prev' : '');
+                if (todayEpisodeCache.key === cacheKey && (Date.now() - todayEpisodeCache.at) < 30000) {
+                    return todayEpisodeCache.text;
+                }
+                todayEpisodeCache.key = cacheKey;
+            }
             const now = new Date();
-            const dateStr = now.toISOString().split('T')[0];
+            const dateStr = localDateString(now);
             const filename = `${dateStr}.md`;
 
             let combinedText = "";
@@ -1570,7 +1958,7 @@ Default: その他通常会話`;
                 
                 if (now.getHours() < 5) {
                     const yesterday = new Date(now.getTime() - (24 * 60 * 60 * 1000));
-                    const prevFilename = `${yesterday.toISOString().split('T')[0]}.md`;
+                    const prevFilename = `${localDateString(yesterday)}.md`;
                     try {
                         const prevHandle = await dirHandle.getFileHandle(prevFilename, { create: false });
                         const prevFile = await prevHandle.getFile();
@@ -1584,6 +1972,8 @@ Default: その他通常会話`;
                     combinedText += await file.text();
                 } catch (e) {}
 
+                todayEpisodeCache.text = combinedText;
+                todayEpisodeCache.at = Date.now();
                 return combinedText;
             } catch (err) {
                 return "";
@@ -1706,17 +2096,21 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 const personsDir = await vaultDirHandle.getDirectoryHandle("Persons", { create: true });
                 for await (const [name, handle] of personsDir.entries()) {
                     if (handle.kind === 'file' && name.endsWith('.md')) {
-                        const file = await handle.getFile();
-                        const text = await file.text();
-                        const match = text.match(/```json\s*([\s\S]*?)\s*```/);
-                        if (match) {
-                            const data = JSON.parse(match[1]);
-                            if (data.descriptor) {
-                                knownFaces.push({
-                                    name: name.replace('.md', ''),
-                                    descriptor: new Float32Array(data.descriptor)
-                                });
+                        try {
+                            const file = await handle.getFile();
+                            const text = await file.text();
+                            const match = text.match(/```json\s*([\s\S]*?)\s*```/);
+                            if (match) {
+                                const data = JSON.parse(match[1]);
+                                if (data.descriptor) {
+                                    knownFaces.push({
+                                        name: name.replace('.md', ''),
+                                        descriptor: new Float32Array(data.descriptor)
+                                    });
+                                }
                             }
+                        } catch (fileErr) {
+                            dbgLog(`[人物読み込み] ${name} の読み込みをスキップしました: ${fileErr.message}`, true);
                         }
                     }
                 }
@@ -1733,15 +2127,19 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 const locationsDir = await vaultDirHandle.getDirectoryHandle("Locations", { create: true });
                 for await (const [name, handle] of locationsDir.entries()) {
                     if (handle.kind === 'file' && name.endsWith('.md')) {
-                        const file = await handle.getFile();
-                        const text = await file.text();
-                        const match = text.match(/\*\*緯度・経度\*\*:\s*([0-9.-]+),\s*([0-9.-]+)/);
-                        if (match) {
-                            knownLocations.push({
-                                name: name.replace('.md', ''),
-                                lat: parseFloat(match[1]),
-                                lon: parseFloat(match[2])
-                            });
+                        try {
+                            const file = await handle.getFile();
+                            const text = await file.text();
+                            const match = text.match(/\*\*緯度・経度\*\*:\s*([0-9.-]+),\s*([0-9.-]+)/);
+                            if (match) {
+                                knownLocations.push({
+                                    name: name.replace('.md', ''),
+                                    lat: parseFloat(match[1]),
+                                    lon: parseFloat(match[2])
+                                });
+                            }
+                        } catch (fileErr) {
+                            dbgLog(`[場所読み込み] ${name} の読み込みをスキップしました: ${fileErr.message}`, true);
                         }
                     }
                 }
@@ -1789,8 +2187,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 });
             }
 
+            let geoTimeoutId = null;
             const timeoutPromise = new Promise((resolve) => {
-                setTimeout(() => {
+                geoTimeoutId = setTimeout(() => {
                     dbgLog("[位置情報警告] 位置情報取得が独自タイムアウト(12秒)しました", true);
                     resolve({ lat: null, lon: null, accuracy: null });
                 }, 12000);
@@ -1808,7 +2207,11 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 return c;
             })();
 
-            return await Promise.race([geoPromise, timeoutPromise]);
+            try {
+                return await Promise.race([geoPromise, timeoutPromise]);
+            } finally {
+                if (geoTimeoutId) clearTimeout(geoTimeoutId);
+            }
         }
 
         async function checkOrAskLocation() {
@@ -2044,6 +2447,8 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
 
             } catch (err) {
                 dbgLog(`[エラー例外捕捉] ${err.name}: ${err.message}`, true);
+                // 失敗時はフラグを戻し、再タップで起動をやり直せるようにする
+                isActivated = false;
                 alert("起動エラー: " + err.message);
             }
         }
@@ -2113,10 +2518,16 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             return questionRegex.test(text.trim());
         }
 
-        function speak(text, callback) {
-            dbgLog(`[発話] ${text}`);
-            lastPetSpeech = text; 
+        // ===== TTSキュー（文単位の先行再生に対応） =====
+        // 従来の speak() は文ごとに speechSynthesis.cancel() していたため分割再生できなかった。
+        // ここではバッチ（1回の発話）単位でキューを管理し、文を順番に再生する。
+        let ttsQueue = [];        // { text, filler } の配列
+        let ttsActive = false;    // 現在再生中の文があるか
+        let ttsBatch = null;      // { onDone, fullText, closed }
+        let ttsSafetyTimer = null;
+        let ttsGen = 0;           // 発話バッチの世代。cancelされた旧発話のコールバックを無効化する
 
+        function abortRecognitionForSpeech() {
             if (recognitionInstance) {
                 try {
                     recognitionInstance.onend = null;
@@ -2126,59 +2537,113 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
             }
             isListening = false;
             updateIndicators();
+        }
 
-            if ('speechSynthesis' in window) {
-                window.speechSynthesis.cancel();
-                stopLipSync();
+        function cancelSpeechBatch() {
+            ttsGen++;
+            ttsQueue = [];
+            ttsBatch = null;
+            ttsActive = false;
+            if (ttsSafetyTimer) { clearTimeout(ttsSafetyTimer); ttsSafetyTimer = null; }
+            if ('speechSynthesis' in window) { try { window.speechSynthesis.cancel(); } catch(e) {} }
+            isSpeaking = false;
+            stopLipSync();
+        }
 
-                if (!selectedVoice) initVoices();
+        function beginSpeechBatch(onDone) {
+            cancelSpeechBatch();
+            abortRecognitionForSpeech();
+            ttsBatch = { onDone: (typeof onDone === 'function') ? onDone : null, fullText: '', closed: false };
+        }
 
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = 'ja-JP';
-                if (selectedVoice) utterance.voice = selectedVoice;
-                utterance.pitch = 1.6; 
-                utterance.rate = 1.3;  
+        function queueSpeechSentence(text, isFiller = false) {
+            const t = String(text || '').trim();
+            if (!t) return;
+            if (!ttsBatch) beginSpeechBatch(null);
+            if (!isFiller) ttsBatch.fullText += t;
+            ttsQueue.push({ text: t, filler: !!isFiller });
+            pumpSpeechQueue();
+        }
 
-                let hasEnded = false;
-                const completeSpeech = () => {
-                    if (hasEnded) return;
-                    hasEnded = true;
-                    if (speechSafetyTimer) clearTimeout(speechSafetyTimer);
-                    isSpeaking = false;
-                    stopLipSync();
+        function closeSpeechBatch() {
+            if (!ttsBatch) return;
+            ttsBatch.closed = true;
+            finishSpeechBatchIfDrained();
+        }
 
-                    if (!isSleeping && !isWakeModeEnabled && isQuestionText(text) && !isListening) {
-                        dbgLog("[質問検知] 疑問形の発話が完了したため、1200ms後に自動で音声入力を開始します");
-                        setTimeout(() => {
-                            if (!isListening && !isSpeaking) startListening();
-                        }, 1200);
-                    } else if (callback) {
-                        callback();
+        function finishSpeechBatchIfDrained() {
+            if (!ttsBatch || !ttsBatch.closed || ttsActive || ttsQueue.length > 0) return;
+            const batch = ttsBatch;
+            ttsBatch = null;
+            isSpeaking = false;
+            stopLipSync();
+            lastPetSpeech = batch.fullText || lastPetSpeech;
+            // callback（次回チェックの予約など）は疑問文でも必ず実行する。
+            // 以前は疑問文だと callback が握り潰され、顔認識・環境観察ループが停止する破綻があった。
+            if (batch.onDone) batch.onDone();
+            if (!isSleeping && batch.fullText && isQuestionText(batch.fullText) && !isListening && !isSpeaking) {
+                dbgLog("[質問検知] 疑問形の発話が完了したため、1500ms後に自動で音声入力を開始します");
+                setTimeout(() => {
+                    if (!isListening && !isSpeaking && !isSleeping) {
+                        if (wakeRecognitionInstance) stopWakeRecognition();
+                        startListening();
                     }
-                };
-
-                utterance.onstart = () => { 
-                    isSpeaking = true;
-                    startLipSync(); 
-                };
-                utterance.onend = completeSpeech;
-                utterance.onerror = (e) => {
-                    dbgLog(`[発話エラー] ${e.error}`, true);
-                    completeSpeech();
-                };
-
-                const estimatedTimeMs = Math.max(3000, text.length * 300);
-                const speechSafetyTimer = setTimeout(() => {
-                    dbgLog("[発話警告] onendイベント未検知のため強制完了します", true);
-                    completeSpeech();
-                }, estimatedTimeMs);
-
-                window.speechSynthesis.speak(utterance);
-            } else {
-                isSpeaking = false;
-                if (callback) callback();
+                }, 1500);
             }
         }
+
+        function pumpSpeechQueue() {
+            if (ttsActive || ttsQueue.length === 0) { finishSpeechBatchIfDrained(); return; }
+            if (!('speechSynthesis' in window)) {
+                ttsQueue = [];
+                if (ttsBatch) ttsBatch.closed = true;
+                finishSpeechBatchIfDrained();
+                return;
+            }
+            const item = ttsQueue.shift();
+            const myGen = ttsGen;
+            ttsActive = true;
+            if (!selectedVoice) initVoices();
+            const utterance = new SpeechSynthesisUtterance(item.text);
+            utterance.lang = 'ja-JP';
+            if (selectedVoice) utterance.voice = selectedVoice;
+            utterance.pitch = 1.6;
+            utterance.rate = 1.3;
+            let ended = false;
+            const completeOne = () => {
+                if (ended || myGen !== ttsGen) return; // キャンセル済み旧発話の遅延コールバックは無視する
+                ended = true;
+                if (ttsSafetyTimer) { clearTimeout(ttsSafetyTimer); ttsSafetyTimer = null; }
+                ttsActive = false;
+                if (ttsQueue.length === 0) isSpeaking = false;
+                stopLipSync();
+                pumpSpeechQueue();
+            };
+            utterance.onstart = () => { if (myGen !== ttsGen) return; isSpeaking = true; startLipSync(); };
+            utterance.onend = completeOne;
+            utterance.onerror = (e) => { dbgLog(`[発話エラー] ${e.error}`, true); completeOne(); };
+            const estimatedTimeMs = Math.max(3000, item.text.length * 300);
+            ttsSafetyTimer = setTimeout(() => {
+                dbgLog("[発話警告] onendイベント未検知のため次の文へ進みます", true);
+                completeOne();
+            }, estimatedTimeMs);
+            try { window.speechSynthesis.speak(utterance); }
+            catch (e) { dbgLog(`[発話例外] ${e.message}`, true); completeOne(); }
+        }
+
+        // 従来互換: 1文（または全文）を割り込み再生し、完了後に callback を呼ぶ
+        function speak(text, callback) {
+            dbgLog(`[発話] ${text}`);
+            beginSpeechBatch(callback || null);
+            queueSpeechSentence(text);
+            closeSpeechBatch();
+        }
+
+        // ストリーミング用: バッチを開き、文を逐次追加し、最後に閉じる
+        function speakStreamBegin(onDone) { beginSpeechBatch(onDone || null); }
+        function speakStreamPush(sentence, isFiller = false) { queueSpeechSentence(sentence, isFiller); }
+        function speakStreamEnd() { closeSpeechBatch(); }
+        function speakStreamCancel() { cancelSpeechBatch(); }
 
         function scheduleNextVisionCheck(delay = 8000) {
             if (isSleeping || isConversing || isWaitingForName || isWaitingForLocationName) return;
@@ -2187,7 +2652,7 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
         }
 
         async function performFaceRecognitionCheck() {
-            if (isApiProcessing || isSleeping || isConversing || isListening || isSpeaking || !isActivated || isWaitingForName || isWaitingForLocationName) {
+            if (isApiProcessing || isEnvApiProcessing || isSleeping || isConversing || isListening || isSpeaking || !isActivated || isWaitingForName || isWaitingForLocationName) {
                 scheduleNextVisionCheck(6000);
                 return;
             }
@@ -2222,8 +2687,14 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                 let bestMatchName = null;
 
                 if (knownFaces.length > 0) {
-                    const labeledDescriptors = knownFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [f.descriptor]));
-                    const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.55);
+                    // FaceMatcher は登録人数分を毎回作り直さず、顔リストが変わった時だけ再構築する
+                    const matcherKey = knownFaces.map(f => f.name).join('|');
+                    if (!window.__faceMatcherCache || window.__faceMatcherKey !== matcherKey) {
+                        const labeledDescriptors = knownFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [f.descriptor]));
+                        window.__faceMatcherCache = new faceapi.FaceMatcher(labeledDescriptors, 0.55);
+                        window.__faceMatcherKey = matcherKey;
+                    }
+                    const faceMatcher = window.__faceMatcherCache;
                     const bestMatch = faceMatcher.findBestMatch(currentDescriptor);
 
                     if (bestMatch && bestMatch.label !== 'unknown') {
@@ -2293,8 +2764,9 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
                     }
                     isWaitingForName = true;
 
-                    if (safetyTimeout) clearTimeout(safetyTimeout);
-                    safetyTimeout = setTimeout(() => {
+                    if (faceWaitSafetyTimeout) clearTimeout(faceWaitSafetyTimeout);
+                    faceWaitSafetyTimeout = setTimeout(() => {
+                        faceWaitSafetyTimeout = null;
                         if (isWaitingForName) {
                             dbgLog("[警告] 名前入力待ちがタイムアウトしました", true);
                             resetInteractionState(5000);
@@ -2565,7 +3037,6 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
   // 優先順位: 眠気(休む) > 寂しさ(呼びかけ) > 退屈(独り言を促す) > 好奇心(表情) > 嬉しさ(表情)
   // Step4の反映: 親密度50以上で寂しさの発動しきい値+10（絆で安心する）。
   // 長期不在の直後は寂しさ50以上でも呼びかけ候補にする。
-  var THRESH = 70;         // 発動しきい値の初期値
   var SAME_TYPE_GAP = 5*60000;  // 同じ種類の自律行動は最低5分空ける
   var ANY_GAP = 2*60000;        // 自律行動全体でも最低2分空ける
   var REPEAT_GAP = 10*60000;    // 直前と同じ行動は10分空ける
@@ -2685,7 +3156,10 @@ ${todayContext || "（※本日最初の再会です。過去の会話ログは�
       save(false); return this.getState();
     },
     onInteraction: onInteraction,
-    canActAutonomously: function(){ return !busy(); },
+    canActAutonomously: function(){
+      try { if (typeof isActivated !== 'undefined' && !isActivated) return false; } catch(e) {}
+      return !busy();
+    },
     chooseAction: chooseAction,
     getCurrentAction: function(){ return JSON.parse(JSON.stringify(state.autonomy.current)); }
   };
